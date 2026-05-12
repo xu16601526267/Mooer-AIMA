@@ -151,17 +151,12 @@ curl http://127.0.0.1:6188/v1/chat/completions \
 ```bash
 cd AIMA-aibook-source
 go test ./internal/onboarding ./internal/cli ./internal/ui ./internal/mcp ./cmd/aima -count=1
-GOOS=linux GOARCH=arm64 go build -o build/aima-linux-arm64 ./cmd/aima
+make aibook-deb
 ```
 
-如果你本地约定把 arm64 二进制输出到 `build-arm64/aima`，打包脚本也会自动识别。
+`make aibook-deb` 会用仓库里的 `-ldflags "-s -w ..."` 构建 arm64 二进制，去掉调试信息后再打包。不要直接用普通 `go build` 打 AIBook 包，否则可能把调试信息带进 `.deb`，导致包体积明显变大。
 
 ### 2. 生成 AIBook 的 `.deb`
-
-```bash
-cd AIMA-aibook-source
-bash scripts/package-aibook-deb.sh build/aima-linux-arm64
-```
 
 默认会在 `build/release/` 下生成一个类似下面名字的包：
 
@@ -169,7 +164,7 @@ bash scripts/package-aibook-deb.sh build/aima-linux-arm64
 aima-aibook_0.5-dev+aibookYYYYMMDD.1_arm64.deb
 ```
 
-如果你想手动指定版本号，也可以带第二个参数：
+如果你确实需要手动指定版本号，先用 `make aibook-deb` 生成去掉调试信息的 `build/aima-linux-arm64`，再调用打包脚本：
 
 ```bash
 bash scripts/package-aibook-deb.sh build/aima-linux-arm64 0.5-dev+aibook20260512.1

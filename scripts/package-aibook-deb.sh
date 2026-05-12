@@ -43,6 +43,15 @@ if ! command -v dpkg-deb >/dev/null 2>&1; then
   exit 1
 fi
 
+if command -v readelf >/dev/null 2>&1; then
+  if readelf -S "$BINARY" | grep -Eq '\.debug_|\.symtab'; then
+    printf 'refusing to package unstripped binary: %s\n' "$BINARY" >&2
+    printf 'run: make aibook-deb\n' >&2
+    printf 'or rebuild with Go linker flags that include -s -w before packaging.\n' >&2
+    exit 1
+  fi
+fi
+
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$OUT_DIR"
 cp -a "$TEMPLATE_DIR/." "$STAGE_DIR/"

@@ -151,17 +151,12 @@ Run this on Linux or WSL because the packaging step depends on `bash` and `dpkg-
 ```bash
 cd AIMA-aibook-source
 go test ./internal/onboarding ./internal/cli ./internal/ui ./internal/mcp ./cmd/aima -count=1
-GOOS=linux GOARCH=arm64 go build -o build/aima-linux-arm64 ./cmd/aima
+make aibook-deb
 ```
 
-If your local convention is to place the arm64 binary at `build-arm64/aima`, the packaging script will detect that automatically.
+`make aibook-deb` builds the arm64 binary with the repository `-ldflags "-s -w ..."` settings, so debug information is stripped before packaging. Do not use a plain `go build` output for the AIBook package, because it can include debug sections and make the `.deb` much larger.
 
 ### 2. Build the AIBook `.deb`
-
-```bash
-cd AIMA-aibook-source
-bash scripts/package-aibook-deb.sh build/aima-linux-arm64
-```
 
 The package will be written to `build/release/` with a name like:
 
@@ -169,7 +164,7 @@ The package will be written to `build/release/` with a name like:
 aima-aibook_0.5-dev+aibookYYYYMMDD.1_arm64.deb
 ```
 
-You can also pin the version explicitly:
+If you need to pin the version explicitly, first run `make aibook-deb` to produce the stripped `build/aima-linux-arm64`, then call the packaging script:
 
 ```bash
 bash scripts/package-aibook-deb.sh build/aima-linux-arm64 0.5-dev+aibook20260512.1
