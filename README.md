@@ -140,6 +140,131 @@ Any OpenAI SDK client works against `http://<server-ip>:6188/v1`.
 
 ---
 
+## AIBook source deployment
+
+Use this flow when you have changed the source tree and need a fresh AIBook `.deb` for deployment.
+
+### 1. Build and smoke-test locally
+
+Run this on Linux or WSL because the packaging step depends on `bash` and `dpkg-deb`.
+
+```bash
+cd AIMA-aibook-source
+go test ./internal/onboarding ./internal/cli ./internal/ui ./internal/mcp ./cmd/aima -count=1
+GOOS=linux GOARCH=arm64 go build -o build/aima-linux-arm64 ./cmd/aima
+```
+
+If your local convention is to place the arm64 binary at `build-arm64/aima`, the packaging script will detect that automatically.
+
+### 2. Build the AIBook `.deb`
+
+```bash
+cd AIMA-aibook-source
+bash scripts/package-aibook-deb.sh build/aima-linux-arm64
+```
+
+The package will be written to `build/release/` with a name like:
+
+```text
+aima-aibook_0.5-dev+aibookYYYYMMDD.1_arm64.deb
+```
+
+You can also pin the version explicitly:
+
+```bash
+bash scripts/package-aibook-deb.sh build/aima-linux-arm64 0.5-dev+aibook20260512.1
+```
+
+### 3. Deploy to the target AIBook
+
+```bash
+scp build/release/aima-aibook_0.5-dev+aibook20260512.1_arm64.deb aibook@192.168.109.142:/tmp/
+ssh aibook@192.168.109.142
+sudo dpkg -i /tmp/aima-aibook_0.5-dev+aibook20260512.1_arm64.deb
+```
+
+### 4. Verify the install
+
+```bash
+dpkg -s aima-aibook | grep Version
+systemctl status aima.service --no-pager
+ss -lntp | grep 6188
+curl http://127.0.0.1:6188/health
+curl -s http://127.0.0.1:6188/ui/api/onboarding-manifest | jq '.default_locale'
+```
+
+Expected results:
+
+- the package version matches the new build
+- `aima.service` is `active (running)`
+- port `6188` is listening
+- `/health` returns `status: "ok"`
+- onboarding manifest returns `default_locale` as `zh`
+
+### 5. Upgrade behavior on AIBook
+
+The current AIBook package supports in-place upgrades:
+
+```bash
+sudo dpkg -i new-aima-aibook_xxx_arm64.deb
+```
+
+During upgrade it will:
+
+- stop the old `aima.service`
+- remove the legacy `aima-serve.service`
+- replace `/usr/local/bin/aima`
+- rewrite `/etc/aima/aima.env`
+- rewrite `/etc/aima/data-dir`
+- clear stale UI cache directories
+- reload systemd and restart `aima.service`
+
+It intentionally keeps persistent data under `/var/lib/aima`, including:
+
+- `/var/lib/aima/aima.db`
+- model state
+- device identity and other persisted settings
+
+If the browser still shows old language or old UI after an upgrade, check browser-side site data first, especially `localStorage` values such as `aima_lang`.
+
+---
+
+## AIBook clean uninstall
+
+If you only want to remove the package but keep data:
+
+```bash
+sudo dpkg -r aima-aibook
+```
+
+That removes the package and service entrypoints, but keeps `/var/lib/aima`.
+
+For a real clean uninstall that also removes config, cache, database, and logs:
+
+```bash
+sudo systemctl stop aima.service || true
+sudo systemctl disable aima.service || true
+sudo dpkg -P aima-aibook
+sudo rm -rf /var/lib/aima /var/log/aima /etc/aima
+sudo rm -f /etc/systemd/system/aima-serve.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+sudo update-desktop-database /usr/share/applications || true
+sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+```
+
+That removes:
+
+- the AIMA package and desktop entry
+- `/etc/aima` environment files
+- `/var/lib/aima` database, model state, device identity, and cache
+- `/var/log/aima` logs
+- any leftover legacy `aima-serve.service`
+
+If you want a factory-reset style reinstall without losing device identity or database state, back up `/var/lib/aima` first and restore only what you need later.
+
+---
+
 ## Battle-tested
 
 Every release tag goes through a UAT matrix first. The same single binary has to run on real hardware we own, across every vendor listed below, before the tag ships.

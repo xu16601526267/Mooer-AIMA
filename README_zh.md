@@ -140,6 +140,131 @@ curl http://127.0.0.1:6188/v1/chat/completions \
 
 ---
 
+## AIBook 源码部署流程
+
+下面这套流程适合在源码目录里改完代码后，重新生成 AIBook 用的 `.deb` 并部署到目标机器。
+
+### 1. 本地构建与自测
+
+建议在 Linux 或 WSL 环境里执行，原因是 AIBook 打包脚本依赖 `bash` 和 `dpkg-deb`。
+
+```bash
+cd AIMA-aibook-source
+go test ./internal/onboarding ./internal/cli ./internal/ui ./internal/mcp ./cmd/aima -count=1
+GOOS=linux GOARCH=arm64 go build -o build/aima-linux-arm64 ./cmd/aima
+```
+
+如果你本地约定把 arm64 二进制输出到 `build-arm64/aima`，打包脚本也会自动识别。
+
+### 2. 生成 AIBook 的 `.deb`
+
+```bash
+cd AIMA-aibook-source
+bash scripts/package-aibook-deb.sh build/aima-linux-arm64
+```
+
+默认会在 `build/release/` 下生成一个类似下面名字的包：
+
+```text
+aima-aibook_0.5-dev+aibookYYYYMMDD.1_arm64.deb
+```
+
+如果你想手动指定版本号，也可以带第二个参数：
+
+```bash
+bash scripts/package-aibook-deb.sh build/aima-linux-arm64 0.5-dev+aibook20260512.1
+```
+
+### 3. 部署到 AIBook 机器
+
+```bash
+scp build/release/aima-aibook_0.5-dev+aibook20260512.1_arm64.deb aibook@192.168.109.142:/tmp/
+ssh aibook@192.168.109.142
+sudo dpkg -i /tmp/aima-aibook_0.5-dev+aibook20260512.1_arm64.deb
+```
+
+### 4. 安装后的校验
+
+```bash
+dpkg -s aima-aibook | grep Version
+systemctl status aima.service --no-pager
+ss -lntp | grep 6188
+curl http://127.0.0.1:6188/health
+curl -s http://127.0.0.1:6188/ui/api/onboarding-manifest | jq '.default_locale'
+```
+
+正常情况下你应该看到：
+
+- 包版本已经切到新版本
+- `aima.service` 为 `active (running)`
+- 端口监听在 `6188`
+- `/health` 返回 `status: "ok"`
+- onboarding manifest 的 `default_locale` 为 `zh`
+
+### 5. 当前 AIBook 包的升级覆盖行为
+
+现在 AIBook 的 `.deb` 支持直接覆盖升级，不需要先卸载旧版：
+
+```bash
+sudo dpkg -i 新版-aima-aibook_xxx_arm64.deb
+```
+
+升级时会自动：
+
+- 停掉旧的 `aima.service`
+- 删除遗留的 `aima-serve.service`
+- 用新包覆盖 `/usr/local/bin/aima`
+- 重写 `/etc/aima/aima.env`
+- 重写 `/etc/aima/data-dir`
+- 清理旧的 UI 缓存目录
+- `daemon-reload` 后重新拉起新的 `aima.service`
+
+升级时会保留这些持久数据，不会因为覆盖安装被删掉：
+
+- `/var/lib/aima/aima.db`
+- 已扫描/已部署的模型状态
+- 设备身份、注册信息和其他持久配置
+
+如果安装完成后浏览器仍显示旧语言或旧页面，优先检查浏览器本地站点数据，例如 `localStorage` 里的 `aima_lang`，必要时刷新或清掉该站点缓存。
+
+---
+
+## AIBook 干净卸载流程
+
+如果只是临时移除程序但保留数据，可以直接：
+
+```bash
+sudo dpkg -r aima-aibook
+```
+
+这会移除包和服务入口，但会保留 `/var/lib/aima` 里的数据库、模型状态和设备信息。
+
+如果你要做真正的“干净卸载”，也就是连配置、缓存、数据库和日志一起清掉，建议按下面顺序执行：
+
+```bash
+sudo systemctl stop aima.service || true
+sudo systemctl disable aima.service || true
+sudo dpkg -P aima-aibook
+sudo rm -rf /var/lib/aima /var/log/aima /etc/aima
+sudo rm -f /etc/systemd/system/aima-serve.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+sudo update-desktop-database /usr/share/applications || true
+sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+```
+
+执行完这套命令后，机器上会一并清掉：
+
+- AIMA 主程序和桌面入口
+- `/etc/aima` 下的环境配置
+- `/var/lib/aima` 下的数据库、模型状态、设备身份和缓存
+- `/var/log/aima` 下的日志
+- 旧遗留的 `aima-serve.service`
+
+如果你只想“像全新安装一样重新来”，但又不想丢设备或数据库，先备份 `/var/lib/aima`，再执行干净卸载，最后按需把备份文件恢复回来。
+
+---
+
 ## 真机实测
 
 不用 mock，不用模拟器。每个 release tag 切之前都要过一轮 UAT 矩阵，同一个二进制在所有厂商的真机上都要跑通。
