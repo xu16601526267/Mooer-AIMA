@@ -1,5 +1,7 @@
 # AIMA
 
+This repository is the Mooer/AIBook customized edition of AIMA.
+
 AI Infrastructure, managed by AI.
 
 Ollama gave you Ollama-level TCO. AIMA hits SOTA inference performance at the same TCO, by putting an AI agent in the loop.

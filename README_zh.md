@@ -1,5 +1,7 @@
 # AIMA
 
+这是 AIMA 的 Mooer/AIBook 定制版。
+
 由 AI 管理的 AI 基础设施。目标是 Ollama 级的 TCO 跑出 vLLM 级的性能，做法是把 AI agent 放进推理回路里。
 
 AIMA 是一个 Go 单二进制，在设备上管理 AI 推理：识别硬件，从 YAML 知识库里挑引擎和配置，部署模型，跑 benchmark，把胜出配置写回知识库。整个回路由内置 agent 驱动；AIMA 本身也是 MCP server，可以被外部 agent（比如 OpenClaw）接管。
