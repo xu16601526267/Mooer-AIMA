@@ -1,0 +1,51 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-rocm
+  type: vllm
+  version: "nightly"
+  supported_model_types: [llm, vlm, embedding]
+hardware:
+  gpu_arch: RDNA3.5
+  vram_min_mib: 4096
+image:
+  # Community gfx1151 build: TheRock nightly ROCm + patched vLLM
+  # https://github.com/kyuz0/amd-strix-halo-vllm-toolboxes
+  name: kyuz0/vllm-therock-gfx1151
+  tag: "latest"
+  size_approx_mb: 15000
+  platforms: [linux/amd64]
+  registries:
+    - docker.io/kyuz0/vllm-therock-gfx1151
+    - registry.cn-hangzhou.aliyuncs.com/aima/vllm-therock
+patterns:
+  - "^vllm$"
+  - "^vllm-"
+  - "^vllm/"
+  - "-vllm"
+  - "vllm/"
+  - ":vllm"
+  - "vllm-therock"
+  - "gfx1151"
+startup:
+  env:
+    HSA_OVERRIDE_GFX_VERSION: "11.5.1"
+    VLLM_USE_TRITON_FLASH_ATTN: "1"
+  default_args:
+    gpu_memory_utilization: 0.90
+    max_model_len: 8192
+  health_check:
+    timeout_s: 600
+amplifier:
+  features:
+    - triton_flash_attention
+  performance_gain: "Better throughput than llamacpp on RDNA3.5 unified memory APU"
+time_constraints:
+  cold_start_s: [60, 180]
+  model_switch_s: [60, 180]
+power_constraints:
+  typical_draw_watts: [60, 120]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/amd64: "container"

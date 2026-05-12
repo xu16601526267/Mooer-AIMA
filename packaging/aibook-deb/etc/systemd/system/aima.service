@@ -1,0 +1,18 @@
+[Unit]
+Description=AIMA AI Inference Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/aima/aima.env
+Environment=HOME=/var/lib/aima
+WorkingDirectory=/var/lib/aima
+ExecStart=/usr/local/bin/aima serve --addr ${AIMA_ADDR} --allow-insecure-no-auth
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

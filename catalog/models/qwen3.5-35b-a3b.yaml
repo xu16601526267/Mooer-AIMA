@@ -1,0 +1,367 @@
+kind: model_asset
+metadata:
+  name: qwen3.5-35b-a3b
+  type: llm
+  family: qwen
+  parameter_count: "35B"
+  released_at: "2025-12"
+storage:
+  formats: [safetensors, gguf]
+  default_path_pattern: "{{.DataDir}}/models/{{.Name}}"
+  sources:
+    # BF16 全精度 ~72GB
+    - type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B
+      format: safetensors
+    # FP8 预量化 ~36GB
+    - type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B-FP8
+      format: safetensors
+    # GGUF 量化 (Q4_K_M=21GB, Q8_0=37GB)
+    - type: huggingface
+      repo: unsloth/Qwen3.5-35B-A3B-GGUF
+      format: gguf
+    - type: modelscope
+      repo: Qwen/Qwen3.5-35B-A3B
+      format: safetensors
+    - type: local_path
+      path: ""
+variants:
+  # --- GB10 (Blackwell, 128GB unified, K3S) ---
+  # BF16 权重 ~72GB, 128GB unified 可容纳
+  # MoE 35B total / 3B active, 支持视觉 + 思考模式
+  # qwen3_5_moe 架构需要 vllm-nightly (stable vLLM 尚不支持)
+  - name: qwen3.5-35b-a3b-blackwell-vllm-nightly-bf16
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 40960
+      unified_memory: true
+    engine: vllm-nightly
+    format: safetensors
+    compatibility:
+      repair_init_commands:
+        - 'python3 -m pip install --no-cache-dir --upgrade transformers==5.4.0'
+        - 'python3 -m pip install --no-cache-dir --upgrade mistral_common==1.10.0'
+        - 'python3 -c "from pathlib import Path; p=Path(\"/usr/local/lib/python3.12/dist-packages/transformers/modeling_rope_utils.py\"); t=p.read_text(); old=\"        received_keys -= ignore_keys\n\"; new=\"        received_keys -= set(ignore_keys)\n\"; p.write_text(t.replace(old, new, 1) if old in t else t)"'
+    default_config:
+      gpu_memory_utilization: 0.8
+      max_model_len: 131072
+      dtype: bfloat16
+      enable_chunked_prefill: false
+      enable_auto_tool_choice: true
+      tool_call_parser: qwen3_xml
+    expected_performance:
+      startup_time_s: 120
+      cold_start_time_s: 300
+      tokens_per_second: [24, 30]        # decode 30 tok/s @1K → 24 tok/s @128K
+      latency_first_token_ms: [96, 133]  # short-context TTFT 96~133ms
+      tpot_ms: [31, 34]                  # measured: TPOT 31.5~33.6ms
+      vram_mib: 67100                    # measured: 65.53 GiB model load
+      notes: "vLLM v0.16.0rc2 (qwen3_5-cu130), FLASH_ATTN backend, 2026-02-28. Qwen3_5MoeForConditionalGeneration arch requires qwen3_5-cu130; aima-vllm-qwen3-omni (vLLM v0.14.0, scitrera.ai build) does NOT support this arch."
+      context_scaling:                   # measured: 1-concurrency, 128-token output
+        # input_tokens: [ttft_s, decode_tok_s, prefill_tok_s]
+        1024:   [0.498,  30.0, 2054]
+        2048:   [0.581,  29.9, 3527]
+        8192:   [1.268,  29.6, 6459]
+        16384:  [2.254,  29.2, 7269]   # prefill peak
+        32768:  [4.727,  28.4, 6931]
+        65536:  [11.954, 26.9, 5482]
+        131072: [34.015, 24.2, 3853]   # 128K full context verified
+      vision:                            # measured: chunked_prefill=true, gmu=0.9
+        tokens_per_image_1024: 1025      # 每张 1024x1024 ≈ 1025 tokens
+        max_single_resolution: 3424      # 3424x3424 OK, 3456x3456 OOM
+        max_images_1024: 255             # 255 × 1024x1024 = 261906 tokens
+        # resolution: [ttft_s, prompt_tokens]
+        single_image_scaling:
+          64:    [0.21,  85]
+          256:   [0.21,  85]
+          512:   [0.36,  350]
+          1024:  [0.66,  4117]
+          2048:  [9.78,  4117]
+          3072:  [9.30,  9237]
+          3424:  [10.80, 11467]
+        multi_image_1024:                # N × 1024x1024
+          1:   [0.40,  350]
+          8:   [0.96,  8233]
+          32:  [15.90, 32882]
+          128: [59.60, 131477]
+          255: [157.20, 261906]          # 逼近 262K context limit
+
+  # --- GB10 vllm-spark variant (vllm-spark-tf5 镜像, 已在 containerd) ---
+  # 与 vllm-nightly 相同模型, 但使用 vllm-spark 引擎 (Transformers 5, FlashInfer)
+  # 支持多模型共存时用较低 gmu; 单独部署默认 gmu=0.85
+  - name: qwen3.5-35b-a3b-blackwell-vllm-spark-bf16
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 40960
+      unified_memory: true
+    engine: vllm-spark
+    format: safetensors
+    default_config:
+      gpu_memory_utilization: 0.9
+      max_model_len: 262144
+      dtype: bfloat16
+      enable_chunked_prefill: true
+    expected_performance:
+      startup_time_s: 120
+      cold_start_time_s: 300
+      vram_mib: 67100
+      notes: "vllm-spark-tf5 v0.16.1rc1, FLASH_ATTN backend. gmu=0.9, 262K context, tool calling enabled (qwen3_xml parser)."
+
+  # --- 2× GB10 多机 PP=2 (Blackwell, 2×128GB unified, Ray cluster) ---
+  # Pipeline Parallel: 前半层在 head GPU, 后半层在 worker GPU
+  # PP 比 TP 更适合跨节点 (25 tok/s vs 15 tok/s), 因为只在 pipeline 分界处传激活值
+  # 需要: 200Gbps 直连, RoCE RDMA, GLOO_SOCKET_IFNAME 在容器级设置
+  # Ray cluster: head 10.0.1.2:6379, worker 10.0.1.1
+  - name: qwen3.5-35b-a3b-blackwell-2node-pp2-bf16
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 40960
+      gpu_count_min: 2
+      unified_memory: true
+    engine: vllm-nightly
+    format: safetensors
+    compatibility:
+      repair_init_commands:
+        - 'python3 -m pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple transformers==5.4.0'
+        - 'python3 -m pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple mistral_common==1.10.0'
+        - 'python3 -c "from pathlib import Path; p=Path(\"/usr/local/lib/python3.12/dist-packages/transformers/modeling_rope_utils.py\"); t=p.read_text(); old=\"        received_keys -= ignore_keys\n\"; new=\"        received_keys -= set(ignore_keys)\n\"; p.write_text(t.replace(old, new, 1) if old in t else t)"'
+    default_config:
+      gpu_memory_utilization: 0.8
+      max_model_len: 8192
+      dtype: bfloat16
+      pipeline_parallel_size: 2
+      distributed_executor_backend: ray
+      enforce_eager: true
+      trust_remote_code: true
+    container_env:
+      VLLM_ATTENTION_BACKEND: TRITON_ATTN
+      GLOO_SOCKET_IFNAME: enp1s0f1np1
+      NCCL_SOCKET_IFNAME: enp1s0f1np1
+      NCCL_IB_DISABLE: "0"
+      NCCL_IB_HCA: "rocep1s0f1,roceP2p1s0f1"
+    expected_performance:
+      startup_time_s: 120
+      cold_start_time_s: 300
+      tokens_per_second: [23, 25]
+      vram_mib: 67100
+      notes: "2× GB10 PP=2, vllm-openai:qwen3_5-cu130 (v0.16.0rc2), Ray 2.54.0, NCCL RoCE RDMA over 200Gbps direct link. PP decode 23-25 tok/s (vs TP=2 12-17 tok/s). KV cache 1.47M tokens, 509x concurrency @8K. GLOO_SOCKET_IFNAME must be set at container level (docker run -e), not just in command — Ray workers inherit container env. First request ~70s warmup. 2026-04-07."
+
+  # --- MetaX N260 (MACA, 2× 64GB HBM2e, Docker) ---
+  # ⛔ BLOCKED: vLLM-MetaX 0.13.0 不支持 Qwen3_5MoeForConditionalGeneration 架构
+  # qwen3_5_moe model_type 需要 transformers>=5.0 + vLLM>=0.16.0
+  # vLLM-MetaX 0.13.0 绑定 transformers 4.57.6 (上限 <5), 无法升级
+  # 等待 MetaX 发布 vLLM-MetaX 0.16.0+ 后启用此 variant
+  # 替代方案: 使用 qwen3-30b-a3b (Qwen2MoeForCausalLM, 已验证 65 tok/s)
+  - name: qwen3.5-35b-a3b-maca-vllm-bf16
+    hardware:
+      gpu_arch: MACA
+      vram_min_mib: 40960
+      gpu_count_min: 2
+      unified_memory: false
+    engine: vllm
+    format: safetensors
+    source:
+      type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B
+    default_config:
+      gpu_memory_utilization: 0.90
+      max_model_len: 32768
+      dtype: bfloat16
+      tensor_parallel_size: 2
+      trust_remote_code: true
+    expected_performance:
+      startup_time_s: 240
+      cold_start_time_s: 360
+      tokens_per_second: [50, 65]
+      vram_mib: 123012
+      notes: "BLOCKED: vLLM-MetaX 0.13.0 lacks Qwen3_5MoeForConditionalGeneration arch. Requires vLLM-MetaX >= 0.16.0 with transformers >= 5.0. Use qwen3-30b-a3b on MACA instead (validated 65 tok/s, 2026-03-06)."
+
+  # --- amd395 (RDNA3.5, 62GB unified, native Vulkan) ---
+  # GGUF Q4_K_M ~22GB, 62GB unified 余量充足 (40GB for KV cache + system)
+  # MoE 35B total / 3B active, Vulkan GPU acceleration
+  # llamacpp b8148+ 支持 qwen3_5_moe 架构 (当前 b8157)
+  # 带宽 ~120 GB/s LPDDR5X, 3B active → 预估 15-30 tok/s decode
+  # AMD 最新文档已列出 gfx1151 的 vLLM/llama.cpp 支持, 但在这台 64GB UMA 主机上,
+  # 当前成功路径仍是 llamacpp-vulkan + GGUF; 现有 vLLM 数据不足且未跑赢 Vulkan
+  - name: qwen3.5-35b-a3b-rdna35-llamacpp-q4
+    hardware:
+      gpu_arch: RDNA3.5
+      vram_min_mib: 0
+      ram_min_mib: 24576
+      unified_memory: true
+    engine: llamacpp-vulkan
+    format: gguf
+    source:
+      type: huggingface
+      repo: unsloth/Qwen3.5-35B-A3B-GGUF
+    default_config:
+      n_gpu_layers: 999
+      ctx_size: 16384
+      ubatch_size: 256
+    expected_performance:
+      startup_time_s: 30
+      cold_start_time_s: 60
+      tokens_per_second: [15, 30]
+      latency_first_token_ms: [50, 200]
+      vram_mib: 22000
+      notes: "llamacpp-vulkan b8157, GGUF Q4_K_M, 62GB unified LPDDR5X. Measured on amd395 with RADV 25.2.8: pp2048 improved from 628 t/s at ubatch=512 to 667 t/s at ubatch=256; keep this override variant-specific because qwen3-30b-a3b regressed at ubatch=256."
+
+  # --- linux-1 (Ada, 2× RTX 4090 = 48GB total) ---
+  # BF16 权重 ~72GB, TP=2 → 每 GPU 36GB, 48GB VRAM 充裕
+  # vram_min_mib: 20480 → 排除 RTX 4060 (8GB), 仅 4090 (48GB) 匹配
+  # 需要 vllm-nightly (v0.16.0+) 支持 Qwen3_5MoeForConditionalGeneration 架构
+  - name: qwen3.5-35b-a3b-ada-vllm-nightly-bf16
+    hardware:
+      gpu_arch: Ada
+      vram_min_mib: 20480
+      gpu_count_min: 2
+      unified_memory: false
+    engine: vllm-nightly
+    format: safetensors
+    compatibility:
+      repair_init_commands:
+        - 'python3 -m pip install --no-cache-dir --upgrade transformers==5.4.0'
+        - 'python3 -m pip install --no-cache-dir --upgrade mistral_common==1.10.0'
+        - 'python3 -c "from pathlib import Path; p=Path(\"/usr/local/lib/python3.12/dist-packages/transformers/modeling_rope_utils.py\"); t=p.read_text(); old=\"        received_keys -= ignore_keys\n\"; new=\"        received_keys -= set(ignore_keys)\n\"; p.write_text(t.replace(old, new, 1) if old in t else t)"'
+    source:
+      type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B
+    default_config:
+      gpu_memory_utilization: 0.85
+      max_model_len: 4096
+      dtype: bfloat16
+      tensor_parallel_size: 2
+      enable_auto_tool_choice: true
+      tool_call_parser: qwen3_xml
+    expected_performance:
+      startup_time_s: 120
+      cold_start_time_s: 300
+      tokens_per_second: [170, 175]            # measured: 172-174 tok/s decode (TP=2, 2× RTX 4090)
+      latency_first_token_ms: [41, 481]        # short 41ms → 2K 481ms
+      tpot_ms: [5.7, 5.8]                      # measured: rock-solid 5.7-5.8ms across all context
+      vram_mib: 88098                           # measured: 44030+44068 MiB (2 GPUs, gmu=0.85)
+      notes: "vLLM v0.16.0rc2 (qwen3_5-cu130), TP=2, FLASH_ATTN, no P2P/NVLink (custom allreduce disabled). Model load 32.86 GiB in 9.3s, torch.compile 22.9s, CUDA graph 13s. No MoE config for RTX 4090 (using default). Triple-model coexistence: gmu=0.78 (KV 2.58GiB/67K tok, ~40.6GiB/GPU, leaves ~7.8GiB/GPU for ASR+TTS). 2026-03-02."
+      context_scaling:                          # measured: 1-concurrency, 128-token output
+        # input_tokens: [ttft_s, decode_tok_s, prefill_tok_s]
+        1024:   [0.083, 173.7, 12337]
+        2048:   [0.481, 174.0, 4257]
+
+  # --- Hygon DCU (BW150, 8× 64GB HBM, K3S) ---
+  # FP16 权重 ~72GB, TP=2 → 每 DCU 36GB, 64GB HBM 余量充足
+  # DCU 不支持 BF16, 必须用 FP16
+  # vllm-dcu 引擎 (harbor.sourcefind.cn 镜像)
+  - name: qwen3.5-35b-a3b-dcu-vllm-fp16
+    hardware:
+      gpu_arch: DCU
+      vram_min_mib: 40960
+      gpu_count_min: 2
+      unified_memory: false
+    engine: vllm
+    format: safetensors
+    source:
+      type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B
+    default_config:
+      gpu_memory_utilization: 0.95
+      max_model_len: 32768
+      dtype: float16
+      tensor_parallel_size: 2
+      enable_auto_tool_choice: true
+      tool_call_parser: qwen3_xml
+    expected_performance:
+      startup_time_s: 120
+      cold_start_time_s: 300
+      tokens_per_second: [10, 30]
+      vram_mib: 72000
+      notes: "vLLM 0.9.2 DCU, FP16, TP=2, untested estimate. 2× BW150 64GB each."
+
+  # --- Ada (2× RTX 4090, KTransformers CPU-GPU hybrid, BF16) ---
+  # BF16 全精度 ~72GB，KTransformers 卸载非活跃 expert 到 CPU
+  # 2× RTX 4090 (48GB) + 503GB RAM → kt 只需 ~10-15GB GPU VRAM
+  # v0.5.1 BLOCKED (transformers 不支持 qwen3_5_moe), v0.5.2 已支持 Qwen3.5
+  - name: qwen3.5-35b-a3b-ada-sglang-kt-bf16
+    hardware:
+      gpu_arch: Ada
+      vram_min_mib: 16384
+      gpu_count_min: 2
+      unified_memory: false
+    engine: sglang-kt
+    format: safetensors
+    source:
+      type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B
+    default_config:
+      mem_fraction_static: 0.85
+      tp_size: 2
+      kt_cpuinfer: 40
+      kt_num_gpu_experts: 6
+      kt_method: BF16
+      context_length: 32768
+      disable_shared_experts_fusion: true
+      chunked_prefill_size: 32768
+      max_running_requests: 16
+      watchdog_timeout: 3000
+    expected_performance:
+      startup_time_s: 120
+      cold_start_time_s: 600
+      tokens_per_second: [15, 40]
+      notes: "SGLang-KT AppImage v0.5.2+, BF16 全精度, CPU-GPU hybrid MoE. 2× RTX 4090 + 503GB RAM. v0.5.2 adds Qwen3.5 Day0 support. Untested estimate."
+
+  # --- Ada 单卡 (RTX 4060 8GB via WSL, KTransformers, GPTQ-Int4) ---
+  # GPTQ-Int4 权重 ~18GB，kt_method=GPTQ_INT4 使用 GPTQSafeTensorLoader + AVX2 内核
+  # 要求: sym=true, desc_act=false
+  # 单卡 8GB: 非 expert 层 ~3GB + 4 GPU expert ~2GB + KV = ~6GB
+  # v0.5.2 AppImage 支持 qwen3_5_moe + GPTQ_INT4 CPU expert offload
+  # 该变体按实测目标机型收敛到 8GB Ada 单卡；低于 8GB 会误导 auto-resolve
+  # 参考 qwen3-30b-a3b 单卡优化实测: 8.53 tok/s (triton+CUDA graph, gpu=4, cpu=24, tp=1)
+  - name: qwen3.5-35b-a3b-ada-1gpu-sglang-kt-gptq
+    hardware:
+      gpu_arch: Ada
+      vram_min_mib: 8192
+      unified_memory: false
+    engine: sglang-kt
+    format: safetensors
+    source:
+      type: huggingface
+      repo: Qwen/Qwen3.5-35B-A3B-GPTQ-Int4
+      quantization: gptq
+    default_config:
+      mem_fraction_static: 0.55
+      tp_size: 1
+      kt_cpuinfer: 24
+      kt_num_gpu_experts: 4
+      kt_threadpool_count: 2
+      kt_method: GPTQ_INT4
+      quantization: gptq_marlin
+      context_length: 4096
+      disable_shared_experts_fusion: true
+      attention_backend: triton
+      max_running_requests: 2
+      watchdog_timeout: 3000
+    expected_performance:
+      startup_time_s: 20
+      cold_start_time_s: 300
+      tokens_per_second: [7, 9]
+      vram_mib: 6000
+      notes: "SGLang-KT AppImage v0.5.2, GPTQ-Int4 (AVX2 GPTQ_INT4 kernel), CPU-GPU hybrid MoE. 1× RTX 4060 8GB (WSL2) + 24GB+ CPU RAM. 35B/3B active — same active params as 30B. Config from qwen3-30b-a3b optimization: 8.53 tok/s (triton+CUDA graph). Same WSL toolchain requirements."
+
+  # --- 所有设备通用 (llamacpp + GGUF Q4_K_M=21GB) ---
+  # linux-1 fallback, dev-win (8GB) / mac-m4 (16GB) 需大量 CPU offload
+  # amd395 已有专属 RDNA3.5 变体 (上方), 此为其他设备 fallback
+  - name: qwen3.5-35b-a3b-universal-llamacpp-q4
+    hardware:
+      gpu_arch: "*"
+      vram_min_mib: 0
+      ram_min_mib: 24576
+    engine: llamacpp
+    format: gguf
+    default_config:
+      quantization: int4
+      n_gpu_layers: 999
+      ctx_size: 4096
+    expected_performance:
+      startup_time_s: 30
+      cold_start_time_s: 60
+      tokens_per_second: [3, 15]
+      latency_first_token_ms: [80, 400]

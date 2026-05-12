@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AIMA
+Name[zh_CN]=AIMA
+Comment=Open AIMA local UI
+Comment[zh_CN]=打开 AIMA 本地管理界面
+Exec=/usr/local/bin/aima-ui
+Icon=aima
+Terminal=false
+Categories=Development;Utility;
+Keywords=AI;LLM;Inference;AIMA;
+StartupNotify=true

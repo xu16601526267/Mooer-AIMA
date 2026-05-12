@@ -1,0 +1,53 @@
+kind: stack_component
+metadata:
+  name: nvidia-ctk
+  version: "1.17.5"
+  description: "NVIDIA Container Toolkit — generates CDI spec for GPU container access"
+
+compatibility:
+  aima_min: "0.0.1"
+
+# Skip on non-NVIDIA platforms
+conditions:
+  skip_profiles:
+    - amd-radeon-8060s-x86  # AMD Radeon — no NVIDIA driver
+    - hygon-bw150-dcu-x86   # Hygon DCU — no NVIDIA driver
+
+source:
+  # GitHub releases only provide deb/rpm bundles, not standalone binaries.
+  # We download the deb tarball and install via dpkg in post_install.
+  archive: "nvidia-container-toolkit_1.17.5_deb.tar.gz"
+  platforms: [linux/amd64, linux/arm64]
+  download:
+    linux/amd64: "https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.5/nvidia-container-toolkit_1.17.5_deb_amd64.tar.gz"
+    linux/arm64: "https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.5/nvidia-container-toolkit_1.17.5_deb_arm64.tar.gz"
+  mirror:
+    linux/amd64:
+      - "https://ghfast.top/https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.5/nvidia-container-toolkit_1.17.5_deb_amd64.tar.gz"
+      - "https://cf.ghproxy.cc/https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.5/nvidia-container-toolkit_1.17.5_deb_amd64.tar.gz"
+      - "https://ghfast.top/https://github.com/Approaching-AI/AIMA/releases/download/bundle/stack/2026-02-26/nvidia-container-toolkit-1.17.5-deb-amd64.tar.gz"
+    linux/arm64:
+      - "https://ghfast.top/https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.5/nvidia-container-toolkit_1.17.5_deb_arm64.tar.gz"
+      - "https://cf.ghproxy.cc/https://github.com/NVIDIA/nvidia-container-toolkit/releases/download/v1.17.5/nvidia-container-toolkit_1.17.5_deb_arm64.tar.gz"
+      - "https://ghfast.top/https://github.com/Approaching-AI/AIMA/releases/download/bundle/stack/2026-02-26/nvidia-container-toolkit-1.17.5-deb-arm64.tar.gz"
+  sha256:
+    linux/amd64: "f1c2b0c8771ddd453eeb1bf570bcbe172ee43778c4638a3f5e9d34893568b917"
+    linux/arm64: "838462ec03c5ede2c2154943ddd18e0d5d8487c77c890d01c1d18678361f4fe0"
+
+install:
+  method: archive
+  daemon: false
+  priority: 6
+  tier: docker
+  # extract_binaries intentionally empty — archive contains .deb packages, not binaries.
+  # post_install handles extraction and dpkg installation.
+  post_install:
+    - "mkdir -p /tmp/nctk && tar xzf {{.DistDir}}/nvidia-container-toolkit_1.17.5_deb.tar.gz -C /tmp/nctk"
+    - "dpkg -i /tmp/nctk/*.deb 2>/dev/null; dpkg -i /tmp/nctk/**/*.deb 2>/dev/null; true"
+    - "rm -rf /tmp/nctk"
+    - "nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+
+verify:
+  command: "nvidia-ctk --version"
+  ready_condition: "1.17.5"
+  timeout_s: 10

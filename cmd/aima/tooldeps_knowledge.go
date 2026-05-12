@@ -1,0 +1,946 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/jguan/aima/catalog"
+	"github.com/jguan/aima/internal/buildinfo"
+	"github.com/jguan/aima/internal/knowledge"
+	"github.com/jguan/aima/internal/mcp"
+
+	state "github.com/jguan/aima/internal"
+	"gopkg.in/yaml.v3"
+)
+
+// buildKnowledgeDeps wires knowledge.*, catalog.*, export/import, and knowledge summary tools.
+func buildKnowledgeDeps(ac *appContext, deps *mcp.ToolDeps) {
+	cat := ac.cat
+	db := ac.db
+	kStore := ac.kStore
+	rt := ac.rt
+	dataDir := ac.dataDir
+	factoryDigests := ac.digests
+
+	deps.ResolveConfig = func(ctx context.Context, modelName, engineType string, overrides map[string]any) (json.RawMessage, error) {
+		hwInfo := buildHardwareInfo(ctx, cat, rt.Name())
+		rd, err := resolveDeployment(ctx, cat, db, kStore, hwInfo, modelName, engineType, "", overrides, dataDir)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(rd.Resolved)
+	}
+	deps.SearchKnowledge = func(ctx context.Context, filter map[string]string) (json.RawMessage, error) {
+		nf := state.NoteFilter{
+			HardwareProfile: filter["hardware"],
+			Model:           filter["model"],
+			Engine:          filter["engine"],
+		}
+		notes, err := db.SearchNotes(ctx, nf)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(notes)
+	}
+	deps.SaveKnowledge = func(ctx context.Context, note json.RawMessage) error {
+		var n state.KnowledgeNote
+		if err := json.Unmarshal(note, &n); err != nil {
+			return fmt.Errorf("parse knowledge note: %w", err)
+		}
+		return db.InsertNote(ctx, &n)
+	}
+	deps.GeneratePod = func(ctx context.Context, modelName, engineType, slot string, configOverrides map[string]any) (json.RawMessage, error) {
+		hwInfo := buildHardwareInfo(ctx, cat, rt.Name())
+		overrides := make(map[string]any, len(configOverrides)+1)
+		for k, v := range configOverrides {
+			overrides[k] = v
+		}
+		if slot != "" {
+			overrides["slot"] = slot
+		}
+		goldenOpt := knowledge.WithGoldenConfig(func(hardware, engine, model string) map[string]any {
+			return queryGoldenOverrides(ctx, kStore, hardware, engine, model)
+		})
+		resolveCat := resolveCatalogWithLocalEngineOverlay(ctx, cat, db, hwInfo, dataDir)
+		resolved, _, err := resolveWithFallback(ctx, resolveCat, db, hwInfo, modelName, engineType, overrides, dataDir, goldenOpt)
+		if err != nil {
+			return nil, err
+		}
+		podYAML, err := knowledge.GeneratePod(resolved)
+		if err != nil {
+			return nil, err
+		}
+		return json.RawMessage(podYAML), nil
+	}
+	deps.ListProfiles = func(ctx context.Context) (json.RawMessage, error) {
+		profiles, err := kStore.ListHardwareProfiles(ctx)
+		if err != nil {
+			return json.Marshal(cat.HardwareProfiles) // fallback to in-memory
+		}
+		return json.Marshal(profiles)
+	}
+	deps.ListEngineAssets = func(ctx context.Context) (json.RawMessage, error) {
+		assets, err := kStore.ListEngineAssets(ctx)
+		if err != nil {
+			return json.Marshal(cat.EngineAssets) // fallback to in-memory
+		}
+		return json.Marshal(assets)
+	}
+	deps.ListModelAssets = func(ctx context.Context) (json.RawMessage, error) {
+		return json.Marshal(cat.ModelAssets)
+	}
+	deps.ListPartitionStrategies = func(ctx context.Context) (json.RawMessage, error) {
+		return json.Marshal(cat.PartitionStrategies)
+	}
+
+	// Knowledge query (enhanced -- SQLite relational queries)
+	deps.SearchConfigs = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p knowledge.SearchParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse search params: %w", err)
+		}
+		result, err := kStore.Search(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
+	deps.CompareConfigs = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p knowledge.CompareParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse compare params: %w", err)
+		}
+		result, err := kStore.Compare(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
+	deps.SimilarConfigs = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p knowledge.SimilarParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse similar params: %w", err)
+		}
+		result, err := kStore.Similar(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
+	deps.LineageConfigs = func(ctx context.Context, configID string) (json.RawMessage, error) {
+		result, err := kStore.Lineage(ctx, configID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
+	deps.GapsKnowledge = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p knowledge.GapsParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse gaps params: %w", err)
+		}
+		result, err := kStore.Gaps(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
+	deps.AggregateKnowledge = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p knowledge.AggregateParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse aggregate params: %w", err)
+		}
+		result, err := kStore.Aggregate(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
+
+	// Knowledge export/import
+	deps.ExportKnowledge = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p struct {
+			Hardware   string `json:"hardware"`
+			Model      string `json:"model"`
+			Engine     string `json:"engine"`
+			OutputPath string `json:"output_path"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse export params: %w", err)
+		}
+
+		configs, err := db.ListConfigurations(ctx, p.Hardware, p.Model, p.Engine)
+		if err != nil {
+			return nil, fmt.Errorf("list configurations: %w", err)
+		}
+
+		var configIDs []string
+		for _, c := range configs {
+			configIDs = append(configIDs, c.ID)
+		}
+
+		// Only fetch benchmarks for matched configs.
+		// When a filter is active but matches no configs, return empty benchmarks
+		// instead of falling through to an unfiltered query.
+		hasFilter := p.Hardware != "" || p.Model != "" || p.Engine != ""
+		var benchmarks []*state.BenchmarkResult
+		if len(configIDs) > 0 || !hasFilter {
+			benchmarks, err = db.ListBenchmarkResults(ctx, configIDs, 0)
+			if err != nil {
+				return nil, fmt.Errorf("list benchmarks: %w", err)
+			}
+		}
+
+		notes, err := db.SearchNotes(ctx, state.NoteFilter{
+			HardwareProfile: p.Hardware,
+			Model:           p.Model,
+			Engine:          p.Engine,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("search notes: %w", err)
+		}
+
+		export := map[string]any{
+			"schema_version": 1,
+			"exported_at":    time.Now().UTC().Format(time.RFC3339),
+			"aima_version":   buildinfo.Version,
+			"filter":         map[string]string{"hardware": p.Hardware, "model": p.Model, "engine": p.Engine},
+			"data": map[string]any{
+				"configurations":    configs,
+				"benchmark_results": benchmarks,
+				"knowledge_notes":   notes,
+			},
+			"stats": map[string]int{
+				"configurations":    len(configs),
+				"benchmark_results": len(benchmarks),
+				"knowledge_notes":   len(notes),
+			},
+		}
+
+		exportJSON, err := json.MarshalIndent(export, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("marshal export: %w", err)
+		}
+
+		if p.OutputPath != "" {
+			if err := os.WriteFile(p.OutputPath, exportJSON, 0644); err != nil {
+				return nil, fmt.Errorf("write export file: %w", err)
+			}
+			return json.Marshal(map[string]any{
+				"path":  p.OutputPath,
+				"stats": export["stats"],
+			})
+		}
+
+		return exportJSON, nil
+	}
+
+	deps.ImportKnowledge = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+		var p struct {
+			InputPath string `json:"input_path"`
+			Conflict  string `json:"conflict"`
+			DryRun    bool   `json:"dry_run"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("parse import params: %w", err)
+		}
+		if p.Conflict == "" {
+			p.Conflict = "skip"
+		}
+
+		data, err := os.ReadFile(p.InputPath)
+		if err != nil {
+			return nil, fmt.Errorf("read import file: %w", err)
+		}
+		envelope, err := parseImportedKnowledgeEnvelope(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse import JSON: %w", err)
+		}
+		if envelope.SchemaVersion != 1 {
+			return nil, fmt.Errorf("unsupported schema version %d (expected 1)", envelope.SchemaVersion)
+		}
+
+		imported := map[string]int{"configurations": 0, "benchmark_results": 0, "knowledge_notes": 0}
+		skipped := 0
+		var errors []string
+
+		rawDB := db.RawDB()
+		tx, err := rawDB.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("begin transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		// All reads and writes go through tx to avoid deadlock
+		// (db uses SetMaxOpenConns(1), so db.GetConfiguration would block).
+
+		// Import configurations
+		for _, c := range envelope.Data.Configurations {
+			var exists int
+			tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM configurations WHERE id = ?`, c.ID).Scan(&exists)
+			if exists > 0 && p.Conflict == "skip" {
+				skipped++
+				continue
+			}
+			if p.DryRun {
+				imported["configurations"]++
+				continue
+			}
+			if exists > 0 {
+				tx.ExecContext(ctx, `DELETE FROM configurations WHERE id = ?`, c.ID)
+			}
+			tagsJSON, _ := json.Marshal(c.Tags)
+			createdAt := c.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = time.Now().UTC()
+			}
+			updatedAt := c.UpdatedAt
+			if updatedAt.IsZero() {
+				updatedAt = createdAt
+			}
+			var derivedFrom sql.NullString
+			if c.DerivedFrom != "" {
+				derivedFrom = sql.NullString{String: c.DerivedFrom, Valid: true}
+			}
+			_, insertErr := tx.ExecContext(ctx,
+				`INSERT INTO configurations (id, hardware_id, engine_id, model_id, partition_slot,
+					config, config_hash, derived_from, status, tags, source, device_id, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				c.ID, c.HardwareID, c.EngineID, c.ModelID, c.Slot,
+				c.Config, c.ConfigHash, derivedFrom, c.Status, string(tagsJSON), c.Source, c.DeviceID, createdAt, updatedAt)
+			if insertErr != nil {
+				errors = append(errors, fmt.Sprintf("config %s: %v", c.ID, insertErr))
+				continue
+			}
+			imported["configurations"]++
+		}
+
+		// Import benchmark results
+		for _, b := range envelope.Data.BenchmarkResults {
+			var exists int
+			tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM benchmark_results WHERE id = ?`, b.ID).Scan(&exists)
+			if exists > 0 && p.Conflict == "skip" {
+				skipped++
+				continue
+			}
+			if p.DryRun {
+				imported["benchmark_results"]++
+				continue
+			}
+			if exists > 0 {
+				tx.ExecContext(ctx, `DELETE FROM benchmark_results WHERE id = ?`, b.ID)
+			}
+			var advisoryIDArg any
+			if b.AdvisoryID != "" {
+				advisoryIDArg = b.AdvisoryID
+			}
+			_, insertErr := tx.ExecContext(ctx,
+				`INSERT INTO benchmark_results (id, config_id, advisory_id, concurrency, input_len_bucket, output_len_bucket, modality,
+					ttft_ms_p50, ttft_ms_p95, ttft_ms_p99, tpot_ms_p50, tpot_ms_p95,
+					throughput_tps, qps, vram_usage_mib, ram_usage_mib, power_draw_watts, gpu_utilization_pct, cpu_usage_pct,
+					error_rate, oom_occurred, stability, duration_s, sample_count, tested_at, agent_model, notes)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				b.ID, b.ConfigID, advisoryIDArg, b.Concurrency, b.InputLenBucket, b.OutputLenBucket, b.Modality,
+				b.TTFTP50ms, b.TTFTP95ms, b.TTFTP99ms, b.TPOTP50ms, b.TPOTP95ms,
+				b.ThroughputTPS, b.QPS, b.VRAMUsageMiB, b.RAMUsageMiB, b.PowerDrawWatts, b.GPUUtilPct, b.CPUUsagePct,
+				b.ErrorRate, b.OOMOccurred, b.Stability, b.DurationS, b.SampleCount, b.TestedAt, b.AgentModel, b.Notes)
+			if insertErr != nil {
+				errors = append(errors, fmt.Sprintf("benchmark %s: %v", b.ID, insertErr))
+				continue
+			}
+			imported["benchmark_results"]++
+		}
+
+		// Import knowledge notes
+		for _, n := range envelope.Data.KnowledgeNotes {
+			var exists int
+			tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_notes WHERE id = ?`, n.ID).Scan(&exists)
+			if exists > 0 && p.Conflict == "skip" {
+				skipped++
+				continue
+			}
+			if p.DryRun {
+				imported["knowledge_notes"]++
+				continue
+			}
+			if exists > 0 {
+				tx.ExecContext(ctx, `DELETE FROM knowledge_notes WHERE id = ?`, n.ID)
+			}
+			tagsJSON, _ := json.Marshal(n.Tags)
+			createdAt := n.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = time.Now().UTC()
+			}
+			_, insertErr := tx.ExecContext(ctx,
+				`INSERT INTO knowledge_notes (id, title, tags, hardware_profile, model, engine, content, confidence, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				n.ID, n.Title, string(tagsJSON), n.HardwareProfile, n.Model, n.Engine, n.Content, n.Confidence, createdAt)
+			if insertErr != nil {
+				errors = append(errors, fmt.Sprintf("note %s: %v", n.ID, insertErr))
+				continue
+			}
+			imported["knowledge_notes"]++
+		}
+
+		// If any inserts failed, rollback the entire transaction
+		if len(errors) > 0 {
+			return json.Marshal(map[string]any{
+				"imported": map[string]int{"configurations": 0, "benchmark_results": 0, "knowledge_notes": 0},
+				"skipped":  skipped,
+				"errors":   errors,
+				"dry_run":  p.DryRun,
+			})
+		}
+
+		if !p.DryRun {
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("commit import: %w", err)
+			}
+			if imported["benchmark_results"] > 0 {
+				refreshPerfVectors(ctx, kStore)
+			}
+		}
+
+		return json.Marshal(map[string]any{
+			"imported": imported,
+			"skipped":  skipped,
+			"dry_run":  p.DryRun,
+		})
+	}
+
+	deps.ListKnowledgeSummary = func(ctx context.Context) (json.RawMessage, error) {
+		profilesRaw, err := json.Marshal(cat.HardwareProfiles)
+		if err != nil {
+			return nil, fmt.Errorf("marshal profiles: %w", err)
+		}
+		enginesRaw, err := json.Marshal(cat.EngineAssets)
+		if err != nil {
+			return nil, fmt.Errorf("marshal engines: %w", err)
+		}
+		modelsRaw, err := json.Marshal(cat.ModelAssets)
+		if err != nil {
+			return nil, fmt.Errorf("marshal models: %w", err)
+		}
+
+		var profiles []map[string]any
+		var engines []map[string]any
+		var models []map[string]any
+		if err := json.Unmarshal(profilesRaw, &profiles); err != nil {
+			return nil, fmt.Errorf("decode profiles: %w", err)
+		}
+		if err := json.Unmarshal(enginesRaw, &engines); err != nil {
+			return nil, fmt.Errorf("decode engines: %w", err)
+		}
+		if err := json.Unmarshal(modelsRaw, &models); err != nil {
+			return nil, fmt.Errorf("decode models: %w", err)
+		}
+
+		summary := map[string]any{
+			"hardware_profiles":    len(profiles),
+			"engine_assets":        len(engines),
+			"model_assets":         len(models),
+			"partition_strategies": len(cat.PartitionStrategies),
+		}
+
+		profileNames := make([]string, 0, len(profiles))
+		for _, hp := range profiles {
+			if n, ok := hp["name"].(string); ok && n != "" {
+				profileNames = append(profileNames, n)
+				continue
+			}
+			if n, ok := hp["id"].(string); ok && n != "" {
+				profileNames = append(profileNames, n)
+			}
+		}
+		summary["profiles"] = profileNames
+
+		engineNames := make([]string, 0, len(engines))
+		for _, ea := range engines {
+			if t, ok := ea["type"].(string); ok && t != "" {
+				engineNames = append(engineNames, t)
+				continue
+			}
+			if n, ok := ea["name"].(string); ok && n != "" {
+				engineNames = append(engineNames, n)
+				continue
+			}
+			if n, ok := ea["id"].(string); ok && n != "" {
+				engineNames = append(engineNames, n)
+			}
+		}
+		summary["engines"] = engineNames
+
+		modelNames := make([]string, 0, len(models))
+		for _, ma := range models {
+			if n, ok := ma["name"].(string); ok && n != "" {
+				modelNames = append(modelNames, n)
+				continue
+			}
+			if n, ok := ma["id"].(string); ok && n != "" {
+				modelNames = append(modelNames, n)
+			}
+		}
+		summary["models"] = modelNames
+
+		partitionNames := make([]string, 0, len(cat.PartitionStrategies))
+		for _, ps := range cat.PartitionStrategies {
+			partitionNames = append(partitionNames, ps.Metadata.Name)
+		}
+		summary["partitions"] = partitionNames
+
+		scenarioNames := make([]string, 0, len(cat.DeploymentScenarios))
+		for _, ds := range cat.DeploymentScenarios {
+			scenarioNames = append(scenarioNames, ds.Metadata.Name)
+		}
+		summary["deployment_scenarios"] = len(cat.DeploymentScenarios)
+		summary["scenarios"] = scenarioNames
+
+		return json.Marshal(summary)
+	}
+
+	deps.CatalogOverride = func(ctx context.Context, kind, name, content string) (json.RawMessage, error) {
+		baseKind := strings.TrimSuffix(kind, "_patch")
+		dir := knowledge.KindToDir(baseKind)
+		if dir == "" {
+			return nil, fmt.Errorf("unknown kind %q", kind)
+		}
+		// Validate override file basename to prevent path traversal.
+		if err := validateOverlayAssetName(name); err != nil {
+			return nil, err
+		}
+		finalContent, bodyKind, err := normalizeUserCatalogPatch(baseKind, name, content, factoryDigests)
+		if err != nil {
+			return nil, err
+		}
+		// Write to user-owned patch overlay directory. Central-owned patches
+		// are produced by the central distillation repo and are read-only here.
+		overlaySubDir := filepath.Join(dataDir, "catalog", "user", dir)
+		if err := os.MkdirAll(overlaySubDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create overlay dir: %w", err)
+		}
+		outPath := filepath.Join(overlaySubDir, name+".patch.yaml")
+		action := "created"
+		if _, err := os.Stat(outPath); err == nil {
+			action = "replaced"
+		}
+		if err := os.WriteFile(outPath, finalContent, 0o644); err != nil {
+			return nil, fmt.Errorf("write overlay: %w", err)
+		}
+		result := map[string]string{
+			"path":      outPath,
+			"action":    action,
+			"kind":      bodyKind,
+			"ownership": "user",
+		}
+		if _, ok := factoryDigests[name]; ok {
+			result["note"] = "user patch shadows factory asset, _base_digest injected"
+		}
+		return json.Marshal(result)
+	}
+
+	deps.CatalogStatus = func(ctx context.Context) (json.RawMessage, error) {
+		factoryCat, _ := knowledge.LoadCatalog(catalog.FS)
+		effective, _ := knowledge.LoadCatalog(catalog.FS)
+		factoryNames := knowledge.CollectNames(factoryCat)
+		overlayDir := filepath.Join(dataDir, "catalog")
+		var overlayCat *knowledge.Catalog
+		var parseWarnings []string
+		overlayCat = &knowledge.Catalog{EngineProfiles: map[string]*knowledge.EngineProfile{}}
+		for _, layer := range []string{"central", "user"} {
+			layerDir := filepath.Join(overlayDir, layer)
+			if info, e := os.Stat(layerDir); e != nil || !info.IsDir() {
+				continue
+			}
+			layerCat, warnings := knowledge.LoadCatalogPatchesLenient(os.DirFS(layerDir), effective)
+			for _, w := range warnings {
+				parseWarnings = append(parseWarnings, layer+": "+w)
+			}
+			overlayCat, _ = knowledge.MergeCatalog(overlayCat, layerCat)
+			effective, _ = knowledge.MergeCatalog(effective, layerCat)
+		}
+		// Find shadowed assets
+		overlayNames := knowledge.CollectNames(overlayCat)
+		overlayKinds := knowledge.CollectNameKinds(overlayCat)
+		type shadowEntry struct {
+			Name  string `json:"name"`
+			Kind  string `json:"kind"`
+			Stale bool   `json:"stale"`
+		}
+		var shadowed []shadowEntry
+		overlayDigests := map[string]string{}
+		for _, layer := range []string{"central", "user"} {
+			for name, digest := range knowledge.ExtractOverlayDigestsFromDir(filepath.Join(overlayDir, layer)) {
+				overlayDigests[name] = digest
+			}
+		}
+		for name := range overlayNames {
+			if factoryNames[name] {
+				stale := false
+				if baseD, ok := overlayDigests[name]; ok {
+					if factD, ok2 := factoryDigests[name]; ok2 && baseD != factD {
+						stale = true
+					}
+				}
+				shadowed = append(shadowed, shadowEntry{Name: name, Kind: overlayKinds[name], Stale: stale})
+			}
+		}
+		status := map[string]any{
+			"factory_assets": catalogSize(factoryCat),
+			"overlay_assets": catalogSize(overlayCat),
+			"shadowed":       shadowed,
+			"parse_warnings": parseWarnings,
+		}
+		return json.Marshal(status)
+	}
+
+	deps.CatalogValidate = func(ctx context.Context) (json.RawMessage, error) {
+		type issue struct {
+			Engine   string `json:"engine"`
+			Severity string `json:"severity"` // "error" or "warning"
+			Field    string `json:"field"`
+			Message  string `json:"message"`
+		}
+		var issues []issue
+
+		knownRegistryPrefixes := []string{
+			"docker.io/", "ghcr.io/", "nvcr.io/", "quay.io/",
+			"registry.cn-", "harbor.", "cr.", "docker.1ms.run/",
+		}
+
+		for _, ea := range cat.EngineAssets {
+			name := ea.Metadata.Name
+
+			// Skip preinstalled engines (no image to validate)
+			if ea.Source != nil && ea.Source.InstallType == "preinstalled" && ea.Image.Name == "" {
+				continue
+			}
+
+			isLocal := ea.Image.Distribution == "local"
+
+			// Check: container engines should have registries (unless local)
+			if ea.Image.Name != "" && len(ea.Image.Registries) == 0 && !isLocal {
+				issues = append(issues, issue{
+					Engine:   name,
+					Severity: "error",
+					Field:    "image.registries",
+					Message:  "container engine has no registries configured; pull will fail",
+				})
+			}
+
+			// Check: image.name should not contain registry prefix
+			if ea.Image.Name != "" {
+				for _, prefix := range knownRegistryPrefixes {
+					if strings.HasPrefix(ea.Image.Name, prefix) {
+						issues = append(issues, issue{
+							Engine:   name,
+							Severity: "warning",
+							Field:    "image.name",
+							Message:  fmt.Sprintf("image name contains registry prefix %q; use short name in image.name and put full paths in registries", prefix),
+						})
+						break
+					}
+				}
+			}
+
+			// Check: single registry = single point of failure
+			if ea.Image.Name != "" && len(ea.Image.Registries) == 1 && !isLocal {
+				issues = append(issues, issue{
+					Engine:   name,
+					Severity: "warning",
+					Field:    "image.registries",
+					Message:  fmt.Sprintf("only one registry (%s); no fallback if it is unavailable", ea.Image.Registries[0]),
+				})
+			}
+
+			// Check: local distribution should have a comment or clear name
+			if isLocal && len(ea.Image.Registries) > 0 {
+				issues = append(issues, issue{
+					Engine:   name,
+					Severity: "warning",
+					Field:    "image.distribution",
+					Message:  "distribution is 'local' but registries are configured; these registries will not be used for pull",
+				})
+			}
+		}
+
+		result := map[string]any{
+			"total_engines": len(cat.EngineAssets),
+			"issues":        issues,
+			"issue_count":   len(issues),
+		}
+		return json.Marshal(result)
+	}
+}
+
+type importedKnowledgeEnvelope struct {
+	SchemaVersion int `json:"schema_version"`
+	Data          struct {
+		Configurations   []*state.Configuration   `json:"configurations"`
+		BenchmarkResults []*state.BenchmarkResult `json:"benchmark_results"`
+		KnowledgeNotes   []*state.KnowledgeNote   `json:"knowledge_notes"`
+	} `json:"data"`
+}
+
+func parseImportedKnowledgeEnvelope(data []byte) (*importedKnowledgeEnvelope, error) {
+	var raw struct {
+		SchemaVersion int `json:"schema_version"`
+		Data          struct {
+			Configurations   []json.RawMessage `json:"configurations"`
+			BenchmarkResults []json.RawMessage `json:"benchmark_results"`
+			KnowledgeNotes   []json.RawMessage `json:"knowledge_notes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	env := &importedKnowledgeEnvelope{SchemaVersion: raw.SchemaVersion}
+	for _, item := range raw.Data.Configurations {
+		cfg, err := parseImportedConfiguration(item)
+		if err != nil {
+			return nil, fmt.Errorf("configuration: %w", err)
+		}
+		env.Data.Configurations = append(env.Data.Configurations, cfg)
+	}
+	for _, item := range raw.Data.BenchmarkResults {
+		bench, err := parseImportedBenchmarkResult(item)
+		if err != nil {
+			return nil, fmt.Errorf("benchmark_result: %w", err)
+		}
+		env.Data.BenchmarkResults = append(env.Data.BenchmarkResults, bench)
+	}
+	for _, item := range raw.Data.KnowledgeNotes {
+		note, err := parseImportedKnowledgeNote(item)
+		if err != nil {
+			return nil, fmt.Errorf("knowledge_note: %w", err)
+		}
+		env.Data.KnowledgeNotes = append(env.Data.KnowledgeNotes, note)
+	}
+	return env, nil
+}
+
+func parseImportedConfiguration(data json.RawMessage) (*state.Configuration, error) {
+	var raw struct {
+		ID          string          `json:"id"`
+		HardwareID  string          `json:"hardware_id"`
+		EngineID    string          `json:"engine_id"`
+		ModelID     string          `json:"model_id"`
+		Slot        string          `json:"slot"`
+		Config      json.RawMessage `json:"config"`
+		ConfigHash  string          `json:"config_hash"`
+		DerivedFrom string          `json:"derived_from"`
+		Status      string          `json:"status"`
+		Tags        []string        `json:"tags"`
+		Source      string          `json:"source"`
+		DeviceID    string          `json:"device_id"`
+		CreatedAt   string          `json:"created_at"`
+		UpdatedAt   string          `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	configJSON, err := normalizeImportedConfigJSON(raw.Config)
+	if err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	createdAt, err := parseImportedTimestamp(raw.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("created_at: %w", err)
+	}
+	updatedAt, err := parseImportedTimestamp(raw.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("updated_at: %w", err)
+	}
+	return &state.Configuration{
+		ID:          raw.ID,
+		HardwareID:  raw.HardwareID,
+		EngineID:    raw.EngineID,
+		ModelID:     raw.ModelID,
+		Slot:        raw.Slot,
+		Config:      configJSON,
+		ConfigHash:  raw.ConfigHash,
+		DerivedFrom: raw.DerivedFrom,
+		Status:      raw.Status,
+		Tags:        raw.Tags,
+		Source:      raw.Source,
+		DeviceID:    raw.DeviceID,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+	}, nil
+}
+
+func parseImportedBenchmarkResult(data json.RawMessage) (*state.BenchmarkResult, error) {
+	var raw struct {
+		ID              string  `json:"id"`
+		ConfigID        string  `json:"config_id"`
+		Concurrency     int     `json:"concurrency"`
+		InputLenBucket  string  `json:"input_len_bucket"`
+		OutputLenBucket string  `json:"output_len_bucket"`
+		Modality        string  `json:"modality"`
+		TTFTP50ms       float64 `json:"ttft_p50_ms"`
+		TTFTP95ms       float64 `json:"ttft_p95_ms"`
+		TTFTP99ms       float64 `json:"ttft_p99_ms"`
+		TPOTP50ms       float64 `json:"tpot_p50_ms"`
+		TPOTP95ms       float64 `json:"tpot_p95_ms"`
+		ThroughputTPS   float64 `json:"throughput_tps"`
+		QPS             float64 `json:"qps"`
+		VRAMUsageMiB    int     `json:"vram_usage_mib"`
+		RAMUsageMiB     int     `json:"ram_usage_mib"`
+		PowerDrawWatts  float64 `json:"power_draw_watts"`
+		GPUUtilPct      float64 `json:"gpu_util_pct"`
+		CPUUsagePct     float64 `json:"cpu_usage_pct"`
+		ErrorRate       float64 `json:"error_rate"`
+		OOMOccurred     bool    `json:"oom_occurred"`
+		Stability       string  `json:"stability"`
+		DurationS       int     `json:"duration_s"`
+		SampleCount     int     `json:"sample_count"`
+		TestedAt        string  `json:"tested_at"`
+		AgentModel      string  `json:"agent_model"`
+		Notes           string  `json:"notes"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	testedAt, err := parseImportedTimestamp(raw.TestedAt)
+	if err != nil {
+		return nil, fmt.Errorf("tested_at: %w", err)
+	}
+	return &state.BenchmarkResult{
+		ID:              raw.ID,
+		ConfigID:        raw.ConfigID,
+		Concurrency:     raw.Concurrency,
+		InputLenBucket:  raw.InputLenBucket,
+		OutputLenBucket: raw.OutputLenBucket,
+		Modality:        raw.Modality,
+		TTFTP50ms:       raw.TTFTP50ms,
+		TTFTP95ms:       raw.TTFTP95ms,
+		TTFTP99ms:       raw.TTFTP99ms,
+		TPOTP50ms:       raw.TPOTP50ms,
+		TPOTP95ms:       raw.TPOTP95ms,
+		ThroughputTPS:   raw.ThroughputTPS,
+		QPS:             raw.QPS,
+		VRAMUsageMiB:    raw.VRAMUsageMiB,
+		RAMUsageMiB:     raw.RAMUsageMiB,
+		PowerDrawWatts:  raw.PowerDrawWatts,
+		GPUUtilPct:      raw.GPUUtilPct,
+		CPUUsagePct:     raw.CPUUsagePct,
+		ErrorRate:       raw.ErrorRate,
+		OOMOccurred:     raw.OOMOccurred,
+		Stability:       raw.Stability,
+		DurationS:       raw.DurationS,
+		SampleCount:     raw.SampleCount,
+		TestedAt:        testedAt,
+		AgentModel:      raw.AgentModel,
+		Notes:           raw.Notes,
+	}, nil
+}
+
+func parseImportedKnowledgeNote(data json.RawMessage) (*state.KnowledgeNote, error) {
+	var raw struct {
+		ID              string   `json:"id"`
+		Title           string   `json:"title"`
+		Tags            []string `json:"tags"`
+		HardwareProfile string   `json:"hardware_profile"`
+		Model           string   `json:"model"`
+		Engine          string   `json:"engine"`
+		Content         string   `json:"content"`
+		Confidence      string   `json:"confidence"`
+		CreatedAt       string   `json:"created_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	createdAt, err := parseImportedTimestamp(raw.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("created_at: %w", err)
+	}
+	return &state.KnowledgeNote{
+		ID:              raw.ID,
+		Title:           raw.Title,
+		Tags:            raw.Tags,
+		HardwareProfile: raw.HardwareProfile,
+		Model:           raw.Model,
+		Engine:          raw.Engine,
+		Content:         raw.Content,
+		Confidence:      raw.Confidence,
+		CreatedAt:       createdAt,
+	}, nil
+}
+
+func normalizeImportedConfigJSON(data json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil
+	}
+	if trimmed[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			return "", err
+		}
+		return decoded, nil
+	}
+	if !json.Valid(data) {
+		return "", fmt.Errorf("invalid JSON")
+	}
+	return string(data), nil
+}
+
+func normalizeUserCatalogPatch(kind, name, content string, factoryDigests map[string]string) ([]byte, string, error) {
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(content), &raw); err != nil {
+		return nil, "", fmt.Errorf("invalid YAML: %w", err)
+	}
+	bodyKind, _ := raw["kind"].(string)
+	patchKind := kind + "_patch"
+	switch bodyKind {
+	case kind:
+		raw["kind"] = patchKind
+	case patchKind:
+	default:
+		return nil, "", fmt.Errorf("kind mismatch: parameter is %q but YAML body is %q", kind, bodyKind)
+	}
+	meta, _ := raw["metadata"].(map[string]any)
+	if meta == nil {
+		meta = map[string]any{}
+		raw["metadata"] = meta
+	}
+	bodyName, _ := meta["name"].(string)
+	if strings.TrimSpace(bodyName) == "" {
+		meta["name"] = name
+	} else if !strings.EqualFold(strings.TrimSpace(bodyName), name) {
+		return nil, "", fmt.Errorf("metadata.name %q does not match requested name %q", bodyName, name)
+	}
+	if digest, ok := factoryDigests[name]; ok {
+		raw["_base_digest"] = digest
+	}
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal patch: %w", err)
+	}
+	return out, patchKind, nil
+}
+
+func parseImportedTimestamp(value string) (time.Time, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, nil
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05Z07",
+		"2006-01-02 15:04:05",
+	} {
+		if ts, err := time.Parse(layout, trimmed); err == nil {
+			return ts.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported timestamp %q", value)
+}

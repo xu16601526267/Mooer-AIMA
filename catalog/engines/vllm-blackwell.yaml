@@ -1,0 +1,49 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-blackwell
+  type: vllm
+  version: "26.01"
+  supported_model_types: [llm, vlm, embedding]
+hardware:
+  gpu_arch: Blackwell
+  vram_min_mib: 4096
+image:
+  # NGC official DGX Spark image, arm64 + Blackwell SM121
+  # NOTE: nvcr.io requires NGC authentication; no China mirror available.
+  # For China users: pre-pull with `docker login nvcr.io` or use `aima engine import`.
+  name: nvcr.io/nvidia/vllm
+  tag: "26.01-py3"
+  size_approx_mb: 12000
+  platforms: [linux/arm64]
+  registries:
+    - nvcr.io/nvidia/vllm
+patterns:
+  - "^vllm$"
+  - "^vllm-"
+  - "^vllm/"
+  - "-vllm"
+  - "vllm/"
+  - ":vllm"
+  - "nvidia/vllm"
+startup:
+  env:
+    VLLM_ATTENTION_BACKEND: TRITON_ATTN
+  default_args:
+    gpu_memory_utilization: 0.75
+    max_model_len: 8192
+  health_check:
+    timeout_s: 600
+amplifier:
+  features:
+    - flash_attention
+  performance_gain: "2-4x throughput vs naive serving, Blackwell SM121 optimized"
+time_constraints:
+  cold_start_s: [30, 90]
+  model_switch_s: [30, 90]
+power_constraints:
+  typical_draw_watts: [40, 80]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/arm64: "container"

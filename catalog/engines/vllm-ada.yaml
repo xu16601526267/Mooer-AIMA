@@ -1,0 +1,42 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-ada
+  type: vllm
+  version: "0.8.5"
+  supported_model_types: [llm, vlm, embedding]
+hardware:
+  gpu_arch: Ada
+  vram_min_mib: 4096
+image:
+  name: vllm/vllm-openai
+  tag: "v0.8.5"
+  size_approx_mb: 9000
+  platforms: [linux/amd64]
+  registries:
+    - docker.io/vllm/vllm-openai
+    - registry.cn-hangzhou.aliyuncs.com/aima/vllm-openai
+patterns:
+  - "^vllm$"
+  - "^vllm-"
+  - "^vllm/"
+  - "-vllm"
+  - "vllm/"
+  - ":vllm"
+startup:
+  default_args:
+    gpu_memory_utilization: 0.90
+    max_model_len: 8192
+amplifier:
+  features:
+    - flash_attention
+  performance_gain: "2-4x throughput vs naive serving"
+time_constraints:
+  cold_start_s: [30, 60]
+  model_switch_s: [30, 60]
+power_constraints:
+  typical_draw_watts: [150, 350]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/amd64: "container"

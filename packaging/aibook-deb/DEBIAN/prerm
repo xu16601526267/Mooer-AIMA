@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+if [ "${1:-}" = "upgrade" ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop aima.service >/dev/null 2>&1 || true
+  fi
+fi
+if [ "${1:-}" = "remove" ] || [ "${1:-}" = "deconfigure" ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop aima.service >/dev/null 2>&1 || true
+    systemctl disable aima.service >/dev/null 2>&1 || true
+  fi
+fi
+exit 0

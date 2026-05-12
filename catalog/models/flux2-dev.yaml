@@ -1,0 +1,164 @@
+kind: model_asset
+metadata:
+  name: flux2-dev
+  type: image_gen
+  family: flux
+  parameter_count: "32B"
+  released_at: "2025-11"
+storage:
+  formats: [safetensors, diffusers]
+  default_path_pattern: "{{.DataDir}}/models/{{.Name}}"
+  sources:
+    - type: huggingface
+      repo: black-forest-labs/FLUX.2-dev
+      format: safetensors
+    - type: local_path
+      path: ""
+variants:
+  # --- AMD W7900D RDNA3 — NF4 量化, 单卡 CPU offload (最大吞吐) ---
+  # Transformer 61GB→18.1GB NF4 + Text Encoder 45GB→15.5GB NF4 + VAE 0.3GB BF16
+  # 单卡 34.3GB peak, 8卡并行 multiprocessing 隔离
+  # Validated 2026-04-07: 1280×720, 30 steps, single=3.5min, 8-parallel=5.3min/8img
+  - name: flux2-dev-rdna3-nf4-single
+    hardware:
+      gpu_arch: RDNA3
+      vram_min_mib: 36864
+      gpu_count_min: 1
+      unified_memory: false
+    engine: z-image-diffusers-rocm
+    format: safetensors
+    source:
+      type: huggingface
+      repo: black-forest-labs/FLUX.2-dev
+    default_config:
+      dtype: bfloat16
+      quantization: nf4
+      quantization_library: bitsandbytes
+      num_inference_steps: 30
+      height: 720
+      width: 1280
+      guidance_scale: 4.0
+      cpu_offload: true
+    expected_performance:
+      seconds_per_step: [5.5, 5.8]
+      total_time_s: [200, 220]
+      vram_mib: 35123
+      notes: >-
+        Validated 2026-04-07 on W7900D 48GB RDNA3. diffusers Flux2Pipeline,
+        Transformer NF4 (diffusers.BitsAndBytesConfig) + Text Encoder NF4
+        (transformers.BitsAndBytesConfig) + VAE BF16.
+        enable_model_cpu_offload() auto-swaps text encoder ↔ transformer.
+        5.6s/step, 30 steps 1280×720 = 3.5min.
+        8-GPU parallel via multiprocessing + HIP_VISIBLE_DEVICES = 5.3min/8img (1.5 img/min).
+        Docker: vllm-test (PyTorch 2.10 + ROCm 7.2). HSA_OVERRIDE_GFX_VERSION=11.0.0.
+
+  # --- AMD W7900D RDNA3 — BF16 全精度, 2卡 staged loading (最佳画质) ---
+  # Stage 1: text encoder device_map="balanced" 2GPU → encode prompt → release
+  # Stage 2: transformer device_map="balanced" 2GPU → denoise → VAE decode
+  # 38.7+32.7 GB peak per pair, 3对并行 (GPU 2-7, skip 0-1 OOM)
+  # Validated 2026-04-08: 1280×720, 30 steps, single=3.9min, 3-parallel=4.0min/3img
+  - name: flux2-dev-rdna3-bf16-staged-2gpu
+    hardware:
+      gpu_arch: RDNA3
+      vram_min_mib: 40960
+      gpu_count_min: 2
+      unified_memory: false
+    engine: z-image-diffusers-rocm
+    format: safetensors
+    source:
+      type: huggingface
+      repo: black-forest-labs/FLUX.2-dev
+    default_config:
+      dtype: bfloat16
+      num_inference_steps: 30
+      height: 720
+      width: 1280
+      guidance_scale: 4.0
+      device_map: balanced
+      max_memory_per_gpu_gib: 35
+      staged_loading: true
+    expected_performance:
+      seconds_per_step: [4.9, 5.1]
+      total_time_s: [230, 250]
+      vram_mib: 73113
+      notes: >-
+        Validated 2026-04-08 on W7900D 48GB RDNA3. BF16 full precision staged loading:
+        text encoder (45GB) balanced across 2 GPU → encode prompt to CPU →
+        release → transformer (61GB) balanced across 2 GPU → denoise → VAE.
+        5.0s/step, 30 steps 1280×720 = 3.9min per image, peak 38.7+32.7 GB per pair.
+        3-pair parallel (GPU 2-7) = 4.0min/3img (0.75 img/min).
+        GPU 0-1 has persistent OOM (suspected NUMA topology on dual EPYC 9334).
+        Docker: vllm-test (PyTorch 2.10 + ROCm 7.2). HSA_OVERRIDE_GFX_VERSION=11.0.0.
+
+  # --- GB10 Blackwell — BF16 全精度, diffusers baseline ---
+  # 106GB model on 128.5GB unified → 112.6GB GPU mem, fits without offload
+  # Validated 2026-04-09: 512×512 20steps=43.5s, torch.compile=37.3s (1.17x)
+  - name: flux2-dev-blackwell-diffusers-bf16
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 115712
+      unified_memory: true
+    engine: z-image-diffusers
+    format: safetensors
+    source:
+      type: modelscope
+      repo: black-forest-labs/FLUX.2-dev
+    default_config:
+      dtype: bfloat16
+      num_inference_steps: 20
+      height: 512
+      width: 512
+      guidance_scale: 3.5
+    expected_performance:
+      seconds_per_step: [2.1, 2.2]
+      total_time_s: [43, 44]
+      vram_mib: 115302
+      notes: >-
+        Validated 2026-04-09 on GB10 DGX Spark (SM121, CC12.1, 128.5GB unified).
+        diffusers 0.37.1, Flux2Pipeline BF16. Resolution scaling (20 steps, baseline):
+        512×512=44s, 768×768=84s, 1024×1024=131s, 1280×720=131s, 1280×1280=232s.
+        Linear with pixel count (~140s/Mpx).
+        torch.compile max-autotune: 1.17x but 234s compile overhead +
+        "Not enough SMs for autotune_gemm" warning on SM121.
+        channels_last: no benefit (0.97x).
+        Container: lmsysorg/sglang:dev-arm64-cu13.
+
+  # --- GB10 Blackwell — BF16, TeaCache 优化 (推荐) ---
+  # TeaCache: 训练无关的 DiT 去噪步骤缓存, CVPR 2025 Highlight
+  # Monkey-patch Flux2Transformer2DModel.forward, 跳过相似步骤的 transformer blocks
+  # Validated 2026-04-09: thresh=0.4 → 22.3s (1.95x), thresh=0.6 → 15.8s (2.75x)
+  - name: flux2-dev-blackwell-teacache-bf16
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 115712
+      unified_memory: true
+    engine: z-image-diffusers
+    format: safetensors
+    source:
+      type: modelscope
+      repo: black-forest-labs/FLUX.2-dev
+    default_config:
+      dtype: bfloat16
+      num_inference_steps: 20
+      height: 512
+      width: 512
+      guidance_scale: 3.5
+      teacache_enabled: true
+      teacache_rel_l1_thresh: 0.4
+    expected_performance:
+      seconds_per_step: [1.1, 1.2]
+      total_time_s: [22, 23]
+      vram_mib: 115302
+      notes: >-
+        Validated 2026-04-09 on GB10 DGX Spark. TeaCache (arXiv:2411.19108) monkey-patch
+        on Flux2Transformer2DModel — FLUX.2 adapted (Flux2Modulation.split for modulated input,
+        FLUX.1 polynomial coefficients [498.65, -283.78, 55.86, -3.82, 0.264] verified compatible).
+        Threshold sweep: 0.25=24.4s/1.79x (9/20 cached, near-lossless),
+        0.4=22.3s/1.95x (10/20, recommended default),
+        0.6=15.8s/2.75x (13/20, preview quality),
+        0.8=13.7s/3.17x (14/20, visible degradation).
+        Zero overhead — no training, compilation, or extra memory needed.
+        Resolution scaling (thresh=0.4): 512×512=23s, 768×768=42s, 1024×1024=68s,
+        1280×720=66s, 1280×1280=118s. Speedup ~1.95-1.98x stable across all resolutions.
+        TeaCache + torch.compile stackable: estimated ~2.3x combined at thresh=0.4.
+        Full benchmark report: docs/flux2-gb10-benchmark-report-2026-04.md.

@@ -1,0 +1,53 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-spark
+  type: vllm-spark
+  version: "0.14.1"
+  supported_model_types: [llm, vlm, embedding]
+  status: blocked
+  status_reason: "all scitrera tags require CUDA 13.1, incompatible with Driver 580"
+hardware:
+  gpu_arch: Blackwell
+  vram_min_mib: 4096
+image:
+  # scitrera/dgx-spark-vllm: community build for DGX Spark / GB10
+  # BLOCKED: all scitrera tags require CUDA 13.1 (PTX incompatible with Driver 580 / CUDA 13.0)
+  # Re-enable after GB10 upgrades to Driver 590+ (DGX OS r590)
+  # Source: https://github.com/scitrera/dgx-spark-vllm
+  name: scitrera/dgx-spark-vllm
+  tag: "0.14.1-t5"
+  size_approx_mb: 25000
+  platforms: [linux/arm64]
+  registries:
+    - docker.io/scitrera/dgx-spark-vllm
+    - docker.1ms.run/scitrera/dgx-spark-vllm
+patterns:
+  - "^vllm-spark"
+  - "vllm-spark"
+  - "spark-vllm"
+startup:
+  env:
+    VLLM_ATTENTION_BACKEND: FLASH_ATTN
+  default_args:
+    gpu_memory_utilization: 0.85
+    max_model_len: 128000
+    enable_chunked_prefill: true
+    enable_auto_tool_choice: true
+    tool_call_parser: qwen3_xml
+  health_check:
+    timeout_s: 600
+amplifier:
+  features:
+    - flash_attention
+    - flashinfer
+  performance_gain: "spark-vllm-docker: SM121 optimized, FlashInfer + FLASH_ATTN, prefill 2-3x faster than official nightly"
+time_constraints:
+  cold_start_s: [60, 300]
+  model_switch_s: [60, 300]
+power_constraints:
+  typical_draw_watts: [40, 80]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/arm64: "container"

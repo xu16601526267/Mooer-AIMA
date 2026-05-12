@@ -1,0 +1,35 @@
+kind: hardware_profile
+metadata:
+  name: nvidia-rtx4090-x86
+  description: "NVIDIA RTX 4090, x86_64, 24GB VRAM per GPU (linux-1: 2× GPU = 48GB total)"
+hardware:
+  gpu:
+    arch: Ada
+    vram_mib: 49152
+    bandwidth_gbps: 1008
+    compute_id: "8.9"
+    compute_units: 16384
+    resource_name: "nvidia.com/gpu"
+    runtime_class_name: "nvidia"
+  cpu:
+    arch: x86_64
+    cores: 16
+    freq_ghz: 3.5
+  ram:
+    total_mib: 65536
+    bandwidth_gbps: 50
+  unified_memory: false
+constraints:
+  tdp_watts: 450
+  power_modes: [450]
+  cooling: active
+partition:
+  gpu_tools: [hami, engine_params, mps]
+  cpu_tools: [k3s_cgroups]
+container:
+  env:
+    NVIDIA_VISIBLE_DEVICES: "all"
+    NVIDIA_DRIVER_CAPABILITIES: "all"
+    LD_LIBRARY_PATH: "/lib/x86_64-linux-gnu:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+  partition_remove_env:
+    - NVIDIA_VISIBLE_DEVICES

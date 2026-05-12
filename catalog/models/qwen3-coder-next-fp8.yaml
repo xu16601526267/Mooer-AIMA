@@ -1,0 +1,130 @@
+kind: model_asset
+metadata:
+  name: qwen3-coder-next-fp8
+  type: llm
+  family: qwen
+  parameter_count: "80B"
+  released_at: "2026-01"
+storage:
+  formats: [safetensors, gguf]
+  default_path_pattern: "{{.DataDir}}/models/{{.Name}}"
+  sources:
+    # FP8 预量化权重 (F8_E4M3 + BF16 混合), ~80GB
+    - type: huggingface
+      repo: Qwen/Qwen3-Coder-Next-FP8
+      format: safetensors
+    # GGUF 量化 (Q4_K_M=48GB, Q8_0=85GB)
+    - type: huggingface
+      repo: Qwen/Qwen3-Coder-Next-GGUF
+      format: gguf
+    - type: modelscope
+      repo: Qwen/Qwen3-Coder-Next-FP8
+      format: safetensors
+    - type: local_path
+      path: ""
+variants:
+  # --- GB10 (Blackwell, 128GB unified) — vllm-nightly 优先 ---
+  # qwen3_5-cu130 (CUDA 13.0), 兼容 Driver 580, 支持 262K 上下文 + Qwen3_5Moe
+  - name: qwen3-coder-next-fp8-blackwell-vllm-nightly-fp8
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 81920
+      unified_memory: true
+    engine: vllm-nightly
+    format: safetensors
+    compatibility:
+      repair_init_commands:
+        - 'python3 -m pip install --no-cache-dir --upgrade transformers==5.4.0'
+        - 'python3 -m pip install --no-cache-dir --upgrade mistral_common==1.10.0'
+        - 'python3 -c "from pathlib import Path; p=Path(\"/usr/local/lib/python3.12/dist-packages/transformers/modeling_rope_utils.py\"); t=p.read_text(); old=\"        received_keys -= ignore_keys\n\"; new=\"        received_keys -= set(ignore_keys)\n\"; p.write_text(t.replace(old, new, 1) if old in t else t)"'
+    default_config:
+      gpu_memory_utilization: 0.85
+      max_model_len: 262144
+      dtype: auto
+      enable_chunked_prefill: true
+      enable_auto_tool_choice: true
+      tool_call_parser: qwen3_xml
+    expected_performance:
+      tokens_per_second: [0.2, 42.5]       # decode 42.5 tok/s @1K → 0.2 tok/s @262K
+      latency_first_token_ms: [239, 141200]
+      tpot_ms: [22.3, 46.6]
+      vram_mib: 113691
+      max_context_tokens: 262144
+      notes: "Primary engine for GB10 Driver 580 (CUDA 13.0). Supports 262K context + Qwen3_5Moe."
+      context_scaling:
+        1024:   [0.280,  41.1, 3570]
+        2048:   [0.451,  38.7, 4433]
+        4096:   [0.859,  34.3, 4658]
+        8192:   [1.686,  27.8, 4745]
+        16384:  [3.514,  19.5, 4610]
+        32768:  [7.624,  11.8, 4276]
+        65536:  [18.079, 5.9,  3617]
+        128000: [47.635, 2.5,  2750]
+        192000: [85.6,   0.4,  2244]
+        220000: [106.4,  0.3,  2068]
+        240000: [122.7,  0.2,  1956]
+        256000: [135.6,  0.2,  1888]
+        262000: [141.2,  0.2,  1855]
+      concurrency_1k:
+        1: [42.6,  174,  22.3]
+        2: [68.5,  219,  27.7]
+        4: [104.1, 362,  35.8]
+        8: [145.6, 530,  51.1]
+
+  # --- GB10 备选 — vllm-spark (需 Driver 590+ / CUDA 13.1, 当前不可用) ---
+  # scitrera/dgx-spark-vllm 所有版本均基于 CUDA 13.1, PTX 不兼容 Driver 580
+  # Prefill 2-3x faster than nightly, 待 DGX OS 升级 r590 后启用
+  - name: qwen3-coder-next-fp8-blackwell-vllm-spark
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 81920
+      unified_memory: true
+    engine: vllm-spark
+    format: safetensors
+    default_config:
+      gpu_memory_utilization: 0.85
+      max_model_len: 128000
+      dtype: auto
+      enable_chunked_prefill: true
+      enable_auto_tool_choice: true
+      tool_call_parser: qwen3_xml
+    expected_performance:
+      tokens_per_second: [6.8, 42.5]       # decode 42.5 tok/s @1K → 6.8 tok/s @128K
+      latency_first_token_ms: [239, 15890]  # TTFT 239ms @1K → 15.9s @128K
+      tpot_ms: [22.4, 55.6]
+      vram_mib: 113691
+      max_context_tokens: 128000
+      notes: "BLOCKED: requires CUDA 13.1 (Driver 590+). 2-3x better prefill than nightly. Re-enable after DGX OS upgrades to r590."
+      context_scaling:
+        1024:   [0.239,  42.5, 4280]
+        2048:   [0.301,  38.4, 6801]
+        4096:   [0.466,  40.3, 8795]
+        8192:   [0.853,  37.0, 9602]
+        16384:  [1.649,  31.9, 9937]
+        32768:  [3.347,  24.5, 9791]
+        65536:  [7.067,  16.5, 9274]
+        128000: [15.890, 6.8,  8055]
+      concurrency_1k:
+        1: [41.4,  242,  22.4]
+        2: [65.3,  286,  28.6]
+        4: [96.3,  548,  37.5]
+        8: [126.5, 910,  55.6]
+
+  # --- 通用 llamacpp (GGUF Q4_K_M=48GB) ---
+  # amd395 (128GB unified) ✓, linux-1 (24GB/GPU + 1TB RAM, GPU+CPU offload) ✓
+  # FP8 80GB >> 2×24GB=48GB TP=2，不设 Ada-vllm
+  # dev-win (8GB) / mac-m4 (16GB) 太小，需极大量 CPU offload
+  - name: qwen3-coder-next-fp8-universal-llamacpp-q4
+    hardware:
+      gpu_arch: "*"
+      vram_min_mib: 0
+      ram_min_mib: 53248
+    engine: llamacpp
+    format: gguf
+    default_config:
+      quantization: int4
+      n_gpu_layers: 999
+      ctx_size: 4096
+    expected_performance:
+      tokens_per_second: [3, 15]
+      latency_first_token_ms: [100, 500]

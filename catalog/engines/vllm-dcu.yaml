@@ -1,0 +1,39 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-dcu
+  type: vllm
+  version: "0.9.2"
+  supported_model_types: [llm, vlm, embedding]
+hardware:
+  gpu_arch: DCU
+  vram_min_mib: 4096
+image:
+  name: harbor.sourcefind.cn:5443/dcu/admin/base/vllm
+  tag: "0.9.2-ubuntu22.04-dtk26.04-0130-py3.10-20260202"
+  size_approx_mb: 20000
+  platforms: [linux/amd64]
+  registries:
+    - harbor.sourcefind.cn:5443/dcu/admin/base/vllm
+patterns:
+  - "dcu/admin/base/vllm"
+  - "/dcu/"
+startup:
+  env:
+    VLLM_USE_FUSED_RMS_ROPE: "1"
+    VLLM_USE_MARLIN_W16A16_MOE: "1"
+  default_args:
+    gpu_memory_utilization: 0.95
+    max_model_len: 32768
+    dtype: float16
+  health_check:
+    timeout_s: 600
+amplifier:
+  performance_gain: "DCU-optimized vLLM with FP16, MoE fused kernels"
+time_constraints:
+  cold_start_s: [60, 300]
+  model_switch_s: [60, 300]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/amd64: "container"

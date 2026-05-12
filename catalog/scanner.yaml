@@ -1,0 +1,126 @@
+kind: scanner_config
+metadata:
+  name: default
+  description: "Default scanner configuration"
+config:
+  # Maximum recursion depth when scanning directories
+  max_scan_depth: 4
+
+  # Minimum model size to consider valid (bytes)
+  # Models smaller than this are likely incomplete/corrupted
+  min_model_size_bytes: 10485760  # 10MB
+
+  # Subdirectory names that are always children of parent models
+  # Directories matching these names will never be considered standalone models
+  skip_subdir_names:
+    - text_encoder
+    - transformer
+    - vae
+    - unet
+    - controlnet
+    - scheduler
+    - feature_extractor
+    - speech_tokenizer
+    - tokenizer
+    - tokenizer_config
+    - processor
+    - gguf-fp16
+    - gguf-q4
+    - gguf-q8
+    - fp16
+    - fp32
+    - quantized
+    - mmproj
+    - encoder
+    - decoder
+    - postprocessor
+    - preprocessor
+    - vision_model
+    - audio_encoder
+    - projection
+
+  # Directory patterns that indicate parent models/pipelines
+  # Subdirectories of these paths will be skipped during recursion
+  parent_patterns:
+    # Diffusion pipelines: contain model_index.json with Pipeline class
+    - indicator_files: ["model_index.json"]
+      indicator_field: "_class_name"
+      indicator_value_contains: "Pipeline"
+
+  # File patterns for model detection
+  # Each pattern has: config files, weight extensions, format, type hint
+  model_patterns:
+    # Diffusers pipelines: root metadata in model_index.json, weights in component subdirs
+    - name: diffusers_pipeline
+      config_files: ["model_index.json"]
+      weight_exts: [".safetensors"]
+      format: "safetensors"
+      type_hint: "image_gen"
+      model_class_hint: "diffusion"
+      indicator_field: "_class_name"
+      indicator_value_contains: "Pipeline"
+      recursive_weights: true
+
+    # HuggingFace safetensors
+    - name: huggingface_safetensors
+      config_files: ["config.json"]
+      weight_exts: [".safetensors"]
+      format: "safetensors"
+
+    # HuggingFace pytorch (bin)
+    - name: huggingface_pytorch
+      config_files: ["config.json", "configuration.json"]
+      weight_exts: ["pytorch_model.bin", ".bin"]
+      format: "pytorch"
+
+    # PyTorch pt
+    - name: pytorch_pt
+      config_files: ["config.json", "configuration.json"]
+      weight_exts: [".pt"]
+      format: "pytorch"
+
+    # PyTorch pth
+    - name: pytorch_pth
+      config_files: ["config.json", "configuration.json"]
+      weight_exts: [".pth"]
+      format: "pytorch"
+
+    # FunASR
+    - name: funasr
+      config_files: ["configuration.json"]
+      weight_exts: [".pt"]
+      format: "pytorch"
+      type_hint: "asr"
+
+    # FunASR ONNX (ASR/VAD models with configuration.json)
+    - name: funasr_onnx
+      config_files: ["configuration.json"]
+      weight_exts: [".onnx"]
+      format: "onnx"
+      skip_min_size: true
+      task_mappings:
+        "speech-recognition": "asr"
+        "voice-activity-detection": "vad"
+        "text-to-speech": "tts"
+        "punctuation": "nlp"
+
+    # ONNX (generic, with config.json or config.yaml)
+    - name: onnx
+      config_files: ["config.json", "config.yaml"]
+      weight_exts: [".onnx"]
+      format: "onnx"
+      skip_min_size: true
+
+    # MNN (Mobile Neural Network, edge inference)
+    - name: mnn
+      config_files: []
+      weight_exts: [".mnn"]
+      format: "mnn"
+      skip_min_size: true
+
+    # GGUF
+    - name: gguf
+      config_files: []
+      weight_exts: [".gguf"]
+      format: "gguf"
+      type_hint: "llm"

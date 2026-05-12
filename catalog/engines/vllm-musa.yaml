@@ -1,0 +1,77 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-musa
+  type: vllm
+  version: "0.9.2-musa"
+  supported_model_types: [llm, vlm, embedding]
+hardware:
+  gpu_arch: MUSA
+  vram_min_mib: 4096
+source:
+  install_type: preinstalled
+  probe:
+    paths:
+      - /usr/local/bin/vllm
+      - /opt/mt-ai/llm/venv/bin/vllm
+    version_command: ["vllm", "--version"]
+    version_pattern: "([\\d.]+)"
+    fallback_version: "unknown"
+startup:
+  env:
+    ENABLE_MUSA_MMA: "1"
+    TRITON_CACHE_DIR: "/tmp/triton"
+    LD_LIBRARY_PATH: "/usr/local/musa/lib:/usr/lib/aarch64-linux-gnu/musa:/usr/lib/aarch64-linux-gnu"
+    MUSA_HOME: "/usr/local/musa"
+  default_args:
+    gpu_memory_utilization: 0.70
+    max_model_len: 16384
+    max_num_seqs: 1
+    swap_space: 0
+    block_size: 32
+    enforce_eager: true
+    dtype: auto
+  health_check:
+    timeout_s: 600
+  warmup:
+    timeout_s: 120
+  log_patterns:
+    phases:
+      - name: model_init
+        pattern: "Starting to load model"
+        progress: 5
+      - name: loading_shards
+        pattern: "Loading safetensors checkpoint shards:\\s+(\\d+)%"
+        progress_regex_group: 1
+        progress_base: 5
+        progress_range: 55
+      - name: weights_loaded
+        pattern: "Loading weights took|Loading model weights"
+        progress: 60
+      - name: ready
+        pattern: "Application startup complete|Uvicorn running"
+        progress: 100
+    errors:
+      - pattern: "OutOfMemoryError|out of memory"
+        message: "GPU memory insufficient"
+      - pattern: "KeyError:\\s*'.*g_idx'"
+        message: "Model weights are incompatible with GPTQ runtime or incomplete"
+      - pattern: "EngineCore failed to start|Engine core initialization failed"
+        message: "Engine core initialization failed"
+      - pattern: "CreatePlatform failed"
+        message: "MUSA platform init failed — check GPU device access"
+      - pattern: "MUSA initialization error"
+        message: "MUSA init error — display may need to be connected"
+amplifier:
+  performance_gain: "MUSA-optimized vLLM, GPTQ quantization, enforce-eager mode"
+partition_hints:
+  recommended_gpu_cores_percent: 80
+time_constraints:
+  cold_start_s: [60, 300]
+  model_switch_s: [60, 300]
+power_constraints:
+  typical_draw_watts: [30, 80]
+runtime:
+  default: "native"
+  platform_recommendations:
+    linux/arm64: "native"

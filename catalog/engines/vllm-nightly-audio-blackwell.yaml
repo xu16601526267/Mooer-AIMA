@@ -1,0 +1,48 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-nightly-audio-blackwell
+  type: vllm-nightly-audio
+  version: "nightly"
+  supported_model_types: [llm, vlm, embedding, asr]
+hardware:
+  gpu_arch: Blackwell
+  vram_min_mib: 4096
+image:
+  # Custom vLLM image with vllm[audio] pre-installed (librosa + soundfile)
+  # Built from vllm/vllm-openai:qwen3_5-cu130 + pip install vllm[audio]
+  name: vllm-asr-audio
+  tag: "latest"
+  size_approx_mb: 9000
+  platforms: [linux/arm64]
+  distribution: local
+patterns:
+  - "^vllm-nightly-audio$"
+  - "vllm-nightly-audio"
+startup:
+  command: ["qwen-asr-serve", "{{.ModelPath}}"]
+  compatibility_probe: qwen_asr_autoconfig
+  env:
+    VLLM_ATTENTION_BACKEND: TRITON_ATTN
+  default_args:
+    gpu_memory_utilization: 0.10
+    max_model_len: 8192
+    mm_encoder_attn_backend: TORCH_SDPA
+  health_check:
+    timeout_s: 600
+amplifier:
+  features:
+    - triton_attention
+    - audio_input
+  performance_gain: "vLLM nightly + audio support for ASR on Blackwell"
+partition_hints:
+  recommended_gpu_cores_percent: 13
+time_constraints:
+  cold_start_s: [120, 300]
+  model_switch_s: [120, 300]
+power_constraints:
+  typical_draw_watts: [40, 80]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/arm64: "container"

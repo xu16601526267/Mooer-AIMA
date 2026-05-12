@@ -1,0 +1,61 @@
+kind: model_asset
+metadata:
+  name: qwen3-tts-0.6b
+  type: tts
+  family: qwen
+  parameter_count: "0.6B"
+  released_at: "2025-09"
+storage:
+  formats: [safetensors]
+  default_path_pattern: "{{.DataDir}}/models/{{.Name}}"
+  sources:
+    - type: huggingface
+      repo: Qwen/Qwen3-TTS-12Hz-0.6B-Base
+      format: safetensors
+    - type: modelscope
+      repo: Qwen/Qwen3-TTS-12Hz-0.6B-Base
+      format: safetensors
+    - type: local_path
+      path: ""
+variants:
+  # --- CPU-only 容器 (任何硬件) ---
+  # 0.6B 参数, CPU 推理 ~4GB 内存, RTF ~0.87
+  # 使用 qwen-tts-fastapi 引擎 (OpenAI 兼容 /v1/audio/speech)
+  - name: qwen3-tts-0.6b-cpu-fastapi
+    hardware:
+      gpu_arch: "*"
+    engine: qwen-tts-fastapi
+    format: safetensors
+    expected_performance:
+      vram_mib: 0
+      notes: "CPU ARM64 RTF ~5.0 (gb10 measured), 24kHz 32bit float WAV, 0.6B params ≈ 4GB RAM"
+
+  # --- Blackwell GPU (GB10/DGX Spark, CUDA 13.0, ARM64) ---
+  # 0.6B 参数, GPU 推理 ~1.2GiB VRAM, 128GB 统一内存余量充足
+  # qwen3-tts-cuda-arm64 镜像: CPU TTS base + torch 2.10.0+cu130
+  - name: qwen3-tts-0.6b-blackwell-fastapi-cuda
+    hardware:
+      gpu_arch: Blackwell
+      vram_min_mib: 2048
+      unified_memory: true
+    engine: qwen-tts-fastapi-cuda
+    format: safetensors
+    default_config:
+      port: 8002
+    expected_performance:
+      vram_mib: 2048
+      notes: "CUDA GPU inference on GB10, torch 2.10.0+cu130, ~1.2GiB model. RTF ~0.8-0.9 (device_map=auto required, fixed in qwen3-tts-cuda-arm64:latest). TTS 7s audio in 5.4s, 20s audio in 16.2s. 24kHz 32bit float WAV. 2026-03-20."
+
+  # --- Ada GPU (RTX 4090, CUDA inference) ---
+  - name: qwen3-tts-0.6b-ada-fastapi-cuda
+    hardware:
+      gpu_arch: Ada
+      vram_min_mib: 2048
+      unified_memory: false
+    engine: qwen-tts-fastapi-cuda
+    format: safetensors
+    default_config:
+      port: 8002
+    expected_performance:
+      vram_mib: 2048
+      notes: "CUDA GPU inference, ~1.2GiB model. Single-threaded: no health probes (liveness kills pod during 2-5min inference). RTF untested. 2026-03-02."

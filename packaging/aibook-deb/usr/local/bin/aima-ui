@@ -1,0 +1,43 @@
+#!/usr/bin/env sh
+set -eu
+
+ENV_FILE=/etc/aima/aima.env
+AIMA_PORT=6188
+if [ -r "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+fi
+AIMA_PORT="${AIMA_PORT:-6188}"
+URL="http://127.0.0.1:${AIMA_PORT}/ui/"
+
+if command -v systemctl >/dev/null 2>&1; then
+  if ! systemctl is-active --quiet aima.service; then
+    systemctl start aima.service >/dev/null 2>&1 || true
+  fi
+fi
+
+# Give the browser target a short chance to come up after service start.
+i=0
+while [ "$i" -lt 20 ]; do
+  if command -v curl >/dev/null 2>&1 && curl -fsS "http://127.0.0.1:${AIMA_PORT}/health" >/dev/null 2>&1; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 0.25
+done
+
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$URL" >/dev/null 2>&1 &
+  exit 0
+fi
+if command -v gio >/dev/null 2>&1; then
+  gio open "$URL" >/dev/null 2>&1 &
+  exit 0
+fi
+if command -v sensible-browser >/dev/null 2>&1; then
+  sensible-browser "$URL" >/dev/null 2>&1 &
+  exit 0
+fi
+
+printf 'AIMA UI: %s\n' "$URL"
+exit 0

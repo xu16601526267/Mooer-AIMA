@@ -1,0 +1,45 @@
+#!/usr/bin/env sh
+set -eu
+
+if command -v systemctl >/dev/null 2>&1; then
+  # Make sure the newly unpacked binary/unit is the one that comes back up.
+  systemctl stop aima.service >/dev/null 2>&1 || true
+  systemctl stop aima-serve.service >/dev/null 2>&1 || true
+  systemctl disable aima-serve.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/aima-serve.service
+fi
+
+mkdir -p /var/lib/aima /var/log/aima /etc/aima
+chmod 0755 /var/lib/aima /var/log/aima /etc/aima
+
+# Keep package-managed defaults authoritative on AIBook upgrades. Persistent
+# runtime data remains in /var/lib/aima; only service/default entry points are
+# refreshed here.
+cat > /etc/aima/aima.env <<'EOF'
+AIMA_DATA_DIR=/var/lib/aima
+AIMA_PORT=6188
+AIMA_ADDR=0.0.0.0:6188
+EOF
+chmod 0644 /etc/aima/aima.env
+
+# Make the shared data-dir pointer explicit and world-readable for CLI users.
+printf '/var/lib/aima\n' > /etc/aima/data-dir
+chmod 0644 /etc/aima/data-dir
+
+find /var/lib/aima -maxdepth 2 \( -name 'ui-cache' -o -name '.ui-cache' -o -name 'web-cache' -o -name '.web-cache' \) -exec rm -rf {} + 2>/dev/null || true
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+  systemctl reset-failed aima.service >/dev/null 2>&1 || true
+  systemctl enable aima.service >/dev/null 2>&1 || true
+  systemctl restart aima.service >/dev/null 2>&1 || true
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+
+exit 0

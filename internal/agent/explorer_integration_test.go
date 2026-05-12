@@ -1,0 +1,215 @@
+package agent
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	state "github.com/jguan/aima/internal"
+)
+
+func TestExplorer_EventTriggersPlanning(t *testing.T) {
+	bus := NewEventBus()
+	e := NewExplorer(ExplorerConfig{
+		Schedule: DefaultScheduleConfig(),
+		Enabled:  true,
+	}, nil, nil, nil, bus,
+		WithGatherGaps(func(ctx context.Context) ([]GapEntry, error) {
+			return []GapEntry{
+				{Model: "qwen3-8b", Engine: "vllm"},
+			}, nil
+		}),
+		WithGatherDeploys(func(ctx context.Context) ([]DeployStatus, error) {
+			return []DeployStatus{
+				{Model: "qwen3-8b", Engine: "vllm", Status: "running"},
+			}, nil
+		}),
+	)
+
+	// Tier 0 (no agent) means events are skipped -- verify Status works
+	status := e.Status()
+	if status.Tier != 0 {
+		t.Errorf("tier = %d, want 0 (no agent)", status.Tier)
+	}
+	if status.Running {
+		t.Error("expected not running before Start")
+	}
+}
+
+func TestExplorer_WithAgentDetectsTier(t *testing.T) {
+	llm := &mockLLM{
+		responses: []*Response{{Content: "ok"}},
+	}
+	a := NewAgent(llm, &mockTools{})
+	a.mode = toolModeContextOnly
+
+	bus := NewEventBus()
+	e := NewExplorer(ExplorerConfig{
+		Schedule: DefaultScheduleConfig(),
+		Enabled:  true,
+	}, a, nil, nil, bus)
+
+	if e.tier != 1 {
+		t.Errorf("tier = %d, want 1 (context_only)", e.tier)
+	}
+
+	status := e.Status()
+	if status.Tier != 1 {
+		t.Errorf("status tier = %d, want 1", status.Tier)
+	}
+
+	a.mode = toolModeEnabled
+	status = e.Status()
+	if status.Tier != 2 {
+		t.Errorf("status tier after refresh = %d, want 2", status.Tier)
+	}
+}
+
+func TestExplorer_BuildPlanInputGathersData(t *testing.T) {
+	bus := NewEventBus()
+	hardwareCalled := false
+	gapsCalled := false
+	deploysCalled := false
+	openQuestionsCalled := false
+
+	e := NewExplorer(ExplorerConfig{
+		Schedule: DefaultScheduleConfig(),
+	}, nil, nil, nil, bus,
+		WithGatherHardware(func(ctx context.Context) (HardwareInfo, error) {
+			hardwareCalled = true
+			return HardwareInfo{Profile: "nvidia-gb10-arm64", GPUArch: "blackwell"}, nil
+		}),
+		WithGatherGaps(func(ctx context.Context) ([]GapEntry, error) {
+			gapsCalled = true
+			return []GapEntry{{Model: "test-model", Engine: "vllm"}}, nil
+		}),
+		WithGatherDeploys(func(ctx context.Context) ([]DeployStatus, error) {
+			deploysCalled = true
+			return []DeployStatus{{Model: "test-model", Engine: "vllm", Status: "running"}}, nil
+		}),
+		WithGatherOpenQuestions(func(ctx context.Context) ([]OpenQuestion, error) {
+			openQuestionsCalled = true
+			return []OpenQuestion{{ID: "oq-1", Model: "test-model", Status: "untested"}}, nil
+		}),
+	)
+
+	ev := &ExplorerEvent{Type: EventScheduledGapScan}
+	input, err := e.buildPlanInput(context.Background(), ev)
+	if err != nil {
+		t.Fatalf("buildPlanInput: %v", err)
+	}
+
+	if !hardwareCalled {
+		t.Error("gatherHardware not called")
+	}
+	if !gapsCalled {
+		t.Error("gatherGaps not called")
+	}
+	if !deploysCalled {
+		t.Error("gatherDeploys not called")
+	}
+	if !openQuestionsCalled {
+		t.Error("gatherOpenQuestions not called")
+	}
+	if input.Hardware.Profile != "nvidia-gb10-arm64" {
+		t.Errorf("hardware profile = %q, want nvidia-gb10-arm64", input.Hardware.Profile)
+	}
+	if len(input.Gaps) != 1 {
+		t.Errorf("gaps = %d, want 1", len(input.Gaps))
+	}
+	if len(input.ActiveDeploys) != 1 {
+		t.Errorf("deploys = %d, want 1", len(input.ActiveDeploys))
+	}
+	if len(input.OpenQuestions) != 1 {
+		t.Errorf("open questions = %d, want 1", len(input.OpenQuestions))
+	}
+	if input.Event.Type != EventScheduledGapScan {
+		t.Errorf("event type = %q, want %q", input.Event.Type, EventScheduledGapScan)
+	}
+}
+
+func TestExplorer_BuildPlanInputSkipsRecentFailedCombos(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	for _, run := range []*state.ExplorationRun{
+		{
+			ID:          "run-failed",
+			Kind:        "validate",
+			Status:      "failed",
+			ModelID:     "qwen3-8b",
+			EngineID:    "vllm",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			StartedAt:   now,
+			CompletedAt: now,
+		},
+		{
+			ID:          "run-completed",
+			Kind:        "validate",
+			Status:      "completed",
+			ModelID:     "glm-4.1v",
+			EngineID:    "sglang",
+			CreatedAt:   now.Add(time.Second),
+			UpdatedAt:   now.Add(time.Second),
+			StartedAt:   now.Add(time.Second),
+			CompletedAt: now.Add(time.Second),
+		},
+	} {
+		if err := db.InsertExplorationRun(ctx, run); err != nil {
+			t.Fatalf("InsertExplorationRun(%s): %v", run.ID, err)
+		}
+	}
+
+	bus := NewEventBus()
+	e := NewExplorer(ExplorerConfig{Schedule: DefaultScheduleConfig()}, nil, nil, db, bus)
+
+	input, err := e.buildPlanInput(ctx, &ExplorerEvent{Type: EventScheduledGapScan})
+	if err != nil {
+		t.Fatalf("buildPlanInput: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, combo := range input.SkipCombos {
+		got[combo.Model+"|"+combo.Engine] = combo.Reason
+	}
+	if got["qwen3-8b|vllm"] != "recently failed" {
+		t.Fatalf("qwen3-8b|vllm reason = %q, want recently failed", got["qwen3-8b|vllm"])
+	}
+	if got["glm-4.1v|sglang"] != "completed" {
+		t.Fatalf("glm-4.1v|sglang reason = %q, want completed", got["glm-4.1v|sglang"])
+	}
+}
+
+func TestExplorer_StartAndStop(t *testing.T) {
+	bus := NewEventBus()
+	e := NewExplorer(ExplorerConfig{
+		Schedule: DefaultScheduleConfig(),
+		Enabled:  true,
+	}, nil, nil, nil, bus)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	go e.Start(ctx)
+
+	// Give it a moment to start
+	time.Sleep(20 * time.Millisecond)
+
+	status := e.Status()
+	if !status.Running {
+		t.Error("expected running after Start")
+	}
+
+	e.Stop()
+	time.Sleep(20 * time.Millisecond)
+
+	status = e.Status()
+	if status.Running {
+		t.Error("expected not running after Stop")
+	}
+}

@@ -1,0 +1,133 @@
+kind: stack_component
+metadata:
+  name: k3s
+  version: "1.31.4+k3s1"
+  description: "K3S with AIMA-optimized defaults for edge AI inference"
+
+compatibility:
+  aima_min: "0.0.1"
+
+source:
+  binary: "k3s"
+  airgap: "k3s-airgap-images.tar.zst"
+  platforms: [linux/amd64, linux/arm64]
+  download:
+    linux/amd64: "https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s"
+    linux/arm64: "https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-arm64"
+  mirror:
+    linux/amd64:
+      - "https://ghfast.top/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s"
+      - "https://cf.ghproxy.cc/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s"
+      - "https://ghfast.top/https://github.com/Approaching-AI/AIMA/releases/download/bundle/stack/2026-02-26/k3s-amd64"
+    linux/arm64:
+      - "https://ghfast.top/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-arm64"
+      - "https://cf.ghproxy.cc/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-arm64"
+      - "https://ghfast.top/https://github.com/Approaching-AI/AIMA/releases/download/bundle/stack/2026-02-26/k3s-arm64"
+  sha256:
+    linux/amd64: "74897e4af26ea383ce50f445752f40ca63a0aef0d90994fb74073c43063eeeb2"
+    linux/arm64: "eff4cc82c8c057bd2dc432025b933616637dcf3df91e9e06720d9208743640d3"
+  airgap_download:
+    linux/amd64: "https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-airgap-images-amd64.tar.zst"
+    linux/arm64: "https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-airgap-images-arm64.tar.zst"
+  airgap_mirror:
+    linux/amd64:
+      - "https://ghfast.top/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-airgap-images-amd64.tar.zst"
+      - "https://cf.ghproxy.cc/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-airgap-images-amd64.tar.zst"
+      - "https://ghfast.top/https://github.com/Approaching-AI/AIMA/releases/download/bundle/stack/2026-02-26/k3s-airgap-images-amd64.tar.zst"
+    linux/arm64:
+      - "https://ghfast.top/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-airgap-images-arm64.tar.zst"
+      - "https://cf.ghproxy.cc/https://github.com/k3s-io/k3s/releases/download/v1.31.4%2Bk3s1/k3s-airgap-images-arm64.tar.zst"
+      - "https://ghfast.top/https://github.com/Approaching-AI/AIMA/releases/download/bundle/stack/2026-02-26/k3s-airgap-images-arm64.tar.zst"
+  airgap_sha256:
+    linux/amd64: "f7a94dc28b3a8da063a41360f480ace1de3040ffd9c9228283975c8dca74d3b7"
+    linux/arm64: "02694da4fb6831757f8d198dd5d9f11fcc435bce468426a56109b9d94a025877"
+
+install:
+  method: binary
+  daemon: true
+  priority: 10
+  tier: k3s
+  args:
+    - flag: "--disable=traefik"
+      rationale: "Edge devices don't need Ingress Controller"
+      source: "k3s-docs"
+      verified: true
+    - flag: "--disable=servicelb"
+      rationale: "No LoadBalancer needed for single-node edge"
+      source: "k3s-docs"
+      verified: true
+    - flag: "--disable=metrics-server"
+      rationale: "AIMA collects GPU metrics via nvidia-smi directly"
+      source: "hypothesis"
+      verified: false
+    - flag: "--disable=local-storage"
+      rationale: "AIMA uses hostPath mounts, no PVC needed — saves ~12MB"
+      source: "k3s-docs"
+      verified: true
+    - flag: "--kubelet-arg=max-pods=20"
+      rationale: "Edge single-node doesn't need default 110 pods limit"
+      source: "community"
+      verified: false
+    - flag: "--node-label=gpu=on"
+      rationale: "HAMi device-plugin DaemonSet requires gpu=on selector"
+      source: "hami-chart"
+      verified: true
+    - flag: "--write-kubeconfig-mode=0644"
+      rationale: "Allow non-root users to run aima deploy/status without sudo"
+      source: "k3s-docs"
+      verified: true
+  env:
+    INSTALL_K3S_SKIP_DOWNLOAD: "true"
+
+verify:
+  command: "k3s kubectl get nodes"
+  ready_condition: "Ready"
+  timeout_s: 60
+  pods:
+    - namespace: kube-system
+      label: "k8s-app=kube-dns"
+      min_ready: 1
+
+profiles:
+  nvidia-gb10-arm64:
+    extra_args:
+      - flag: "--kubelet-arg=kube-reserved=cpu=500m,memory=512Mi"
+        rationale: "Reserve resources for system to avoid squeezing inference VRAM"
+        source: "hypothesis"
+        verified: false
+    extra_env:
+      GOMEMLIMIT: "800MiB"
+  nvidia-rtx4090-x86:
+    extra_args:
+      - flag: "--kubelet-arg=kube-reserved=cpu=1000m,memory=1Gi"
+        rationale: "x86 servers have more CPU/RAM headroom"
+        source: "hypothesis"
+        verified: false
+
+registries:
+  # K3S 按顺序尝试，第一个失败/慢时自动 fallback 到下一个
+  # 用户可通过 `aima init` 写入 /etc/rancher/k3s/registries.yaml
+  # 如遇限速，调整顺序或替换为可用的 mirror
+  mirrors:
+    docker.io:
+      endpoint:
+        - "https://docker.m.daocloud.io"    # DaoCloud — 稳定，国内首选
+        - "https://docker.1ms.run"           # 1ms.run — 快速备选
+        - "https://hub.rat.dev"              # rat.dev — 稳定
+        - "https://proxy.vvvv.ee"            # vvvv.ee — 稳定
+        - "https://dockerproxy.net"          # dockerproxy — 稳定
+    ghcr.io:
+      endpoint:
+        - "https://ghcr.nju.edu.cn"          # 南京大学
+        - "https://ghcr.m.daocloud.io"       # DaoCloud
+    nvcr.io:
+      endpoint:
+        - "https://nvcr.io"                  # NGC 无国内 mirror，直连
+
+open_questions:
+  - question: "What kubelet reserved values work best for GB10 unified memory?"
+    hypothesis: "cpu=500m,memory=512Mi"
+    test_method: "Deploy then observe kubectl top node and inference VRAM headroom"
+  - question: "Does disabling metrics-server affect HAMi device plugin reporting?"
+    hypothesis: "No impact — HAMi uses independent gRPC registration"
+    test_method: "Disable then deploy multi-model partition, observe GPU allocation"

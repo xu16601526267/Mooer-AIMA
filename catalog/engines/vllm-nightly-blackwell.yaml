@@ -1,0 +1,59 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-nightly-blackwell
+  type: vllm-nightly
+  version: "nightly"
+  supported_model_types: [llm, vlm, embedding]
+  status: blocked
+  status_reason: "image vllm/vllm-openai:qwen3_5-cu130 does not exist in any registry"
+hardware:
+  gpu_arch: Blackwell
+  vram_min_mib: 4096
+image:
+  # vLLM Qwen3.5 build, CUDA 13.0, multi-arch (incl arm64)
+  name: vllm/vllm-openai
+  tag: "qwen3_5-cu130"
+  size_approx_mb: 8000
+  platforms: [linux/arm64, linux/amd64]
+  registries:
+    - docker.io/vllm/vllm-openai
+    - registry.cn-hangzhou.aliyuncs.com/aima/vllm-openai
+patterns:
+  - "^vllm-nightly$"
+  - "vllm-nightly"
+  - "vllm/vllm-openai:qwen3_5"
+startup:
+  env:
+    VLLM_ATTENTION_BACKEND: TRITON_ATTN
+  default_args:
+    gpu_memory_utilization: 0.8
+    max_model_len: 128000
+    enable_chunked_prefill: false
+  health_check:
+    # 1200s covers transformers pip-install on first boot (~3-4m) + NVFP4
+    # model load for 50+ GiB models (~5-6m). Tune runs with 5 configs × this
+    # cold-start will still blow a 30m cap; cap ready configs to small sweeps.
+    timeout_s: 1200
+  warmup:
+    # /health returning 200 only means the HTTP listener is up; vLLM can
+    # still be compiling graphs or loading weights. A one-token chat
+    # completion round-trip is the real inference-ready signal. Timeout
+    # headroom must cover nvfp4 quant weight load on arm64.
+    enabled: true
+    prompt: "ping"
+    max_tokens: 1
+    timeout_s: 60
+amplifier:
+  features:
+    - triton_attention
+  performance_gain: "2-4x throughput vs naive serving, nightly with latest model support"
+time_constraints:
+  cold_start_s: [120, 600]
+  model_switch_s: [120, 600]
+power_constraints:
+  typical_draw_watts: [40, 80]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/arm64: "container"

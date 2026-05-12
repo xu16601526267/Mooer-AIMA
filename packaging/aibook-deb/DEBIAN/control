@@ -1,0 +1,14 @@
+Package: aima-aibook
+Version: 0.4.0+aibook20260510.1
+Section: utils
+Priority: optional
+Architecture: arm64
+Maintainer: AIMA <support@aimaserver.com>
+Installed-Size: 24080
+Depends: systemd, xdg-utils
+Recommends: curl
+Description: AIMA for Moore Threads AIBook
+ AIMA local AI inference manager packaged for Moore Threads AIBook devices.
+ This package installs the AIMA binary, systemd service, desktop launcher,
+ and desktop icon. Models, engine images, Docker, K3S, and cloud identity
+ state are intentionally not included.

@@ -1,0 +1,44 @@
+kind: engine_asset
+_profile: vllm
+metadata:
+  name: vllm-nightly-ada
+  type: vllm-nightly
+  version: "nightly"
+  supported_model_types: [llm, vlm, embedding]
+  status: blocked
+  status_reason: "image vllm/vllm-openai:qwen3_5-cu130 does not exist in any registry"
+hardware:
+  gpu_arch: Ada
+  vram_min_mib: 4096
+image:
+  # vLLM Qwen3.5 build, CUDA 13.0, multi-arch
+  name: vllm/vllm-openai
+  tag: "qwen3_5-cu130"
+  size_approx_mb: 8000
+  platforms: [linux/amd64]
+  registries:
+    - docker.io/vllm/vllm-openai
+    - registry.cn-hangzhou.aliyuncs.com/aima/vllm-openai
+patterns:
+  - "^vllm-nightly$"
+  - "vllm-nightly"
+  - "vllm/vllm-openai:qwen3_5"
+startup:
+  default_args:
+    gpu_memory_utilization: 0.85
+    max_model_len: 8192
+  health_check:
+    timeout_s: 600
+amplifier:
+  features:
+    - flash_attention
+  performance_gain: "2-4x throughput vs naive serving, nightly with latest model support"
+time_constraints:
+  cold_start_s: [60, 180]
+  model_switch_s: [60, 180]
+power_constraints:
+  typical_draw_watts: [150, 350]
+runtime:
+  default: "container"
+  platform_recommendations:
+    linux/amd64: "container"
