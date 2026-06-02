@@ -55,6 +55,7 @@ fi
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$OUT_DIR"
 cp -a "$TEMPLATE_DIR/." "$STAGE_DIR/"
+find "$STAGE_DIR" -type d -exec chmod 0755 {} +
 
 install -m 0755 "$BINARY" "$STAGE_DIR/usr/local/bin/aima"
 chmod 0755 "$STAGE_DIR/usr/local/bin/aima-ui"

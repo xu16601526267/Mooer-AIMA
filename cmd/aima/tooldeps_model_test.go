@@ -120,6 +120,24 @@ func TestImportModelPublishesModelDiscovered(t *testing.T) {
 	}
 }
 
+func TestInferModelClassUsesCatalogOverride(t *testing.T) {
+	ma := &knowledge.ModelAsset{
+		Metadata: knowledge.ModelMetadata{
+			Name:       "mooer-asr-1.5b",
+			Type:       "asr",
+			ModelClass: "component",
+		},
+	}
+	variant := &knowledge.ModelVariant{Format: "safetensors"}
+
+	if got := inferModelClass(ma, nil); got != "component" {
+		t.Fatalf("inferModelClass(nil variant) = %q, want component", got)
+	}
+	if got := inferModelClass(ma, variant); got != "component" {
+		t.Fatalf("inferModelClass(safetensors variant) = %q, want component", got)
+	}
+}
+
 func writeScanModelFixture(dir string, weightSize int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

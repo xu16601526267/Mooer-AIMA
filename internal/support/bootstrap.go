@@ -99,6 +99,14 @@ func (s *Service) Bootstrap(ctx context.Context, opts BootstrapOptions) (Bootstr
 			}
 			return BootstrapResult{}, err
 		}
+		var browser *BrowserConfirmationError
+		if errors.As(err, &browser) {
+			if setErr := s.store.SetConfig(ctx, cloud.ConfigRegistrationState, cloud.StateUnregistered); setErr != nil {
+				s.logger.Warn("restore registration_state=unregistered after browser confirmation requirement",
+					"error", setErr, "device_code", browser.DeviceCode)
+			}
+			return BootstrapResult{}, err
+		}
 		s.tagRegistrationFailed(ctx)
 		return BootstrapResult{}, err
 	}
@@ -137,6 +145,13 @@ func (s *Service) RenewToken(ctx context.Context) (time.Time, error) {
 
 	var resp renewTokenResponse
 	url := endpoint + "/devices/" + state.DeviceID + "/renew-token"
+	if refreshed, ok, err := s.refreshTokenWithIdentity(ctx, endpoint, state); err == nil && ok {
+		state = refreshed
+		expires, _ := time.Parse(time.RFC3339, state.TokenExpiresAt)
+		return expires, nil
+	} else if err != nil && !isAuthError(err) {
+		s.logger.Warn("support identity token renewal failed; falling back to bearer renew", "error", err)
+	}
 	if err := s.doJSON(ctx, http.MethodPost, url, state.Token, nil, &resp); err != nil {
 		return time.Time{}, err
 	}
@@ -146,6 +161,13 @@ func (s *Service) RenewToken(ctx context.Context) (time.Time, error) {
 	if resp.TokenExpiresAt != "" {
 		state.TokenExpiresAt = resp.TokenExpiresAt
 	}
+	if resp.TokenKind != "" {
+		state.TokenKind = resp.TokenKind
+	}
+	if resp.TokenPersistence != "" {
+		state.TokenPersistence = resp.TokenPersistence
+	}
+	state.PersistentTokenFallbackEnabled = resp.PersistentTokenFallbackEnabled
 	if err := s.saveState(ctx, state); err != nil {
 		return time.Time{}, err
 	}
@@ -164,6 +186,9 @@ func (s *Service) ResetIdentity(ctx context.Context) error {
 		configStateReferralCode,
 		configStateShareText,
 		configStateTokenExpiresAt,
+		configStateTokenKind,
+		configStateTokenPersistence,
+		configStatePersistentToken,
 		configStatePollIntervalSec,
 		configStateMaxTasks,
 		configStateUsedTasks,
@@ -192,6 +217,14 @@ func (s *Service) ResetIdentity(ctx context.Context) error {
 		configStateBrowserConfirmVerificationURIComplete,
 		configStateBrowserConfirmExpiresIn,
 		configStateBrowserConfirmInterval,
+		configStateBrowserConfirmCreatedAt,
+		configStateBrowserConfirmExpiresAt,
+		configIdentityDeviceID,
+		configIdentityKeyID,
+		configIdentityPrivateKeyPEM,
+		configIdentityPublicKeyPEM,
+		configIdentityAlgorithm,
+		configIdentityStorageClass,
 		cloud.ConfigDeviceID,
 		cloud.ConfigDeviceToken,
 		cloud.ConfigRecoveryCode,
@@ -269,10 +302,11 @@ var (
 //   - success (Bootstrap returns nil): worker returns, leaving the edge ready
 //     for outbound Central/aima-service calls.
 //   - context cancellation: worker returns without an error.
-//   - RegistrationPromptError (invalid invite / recovery required): worker
-//     gives up because the condition cannot be fixed without user input. The
-//     CLI / onboarding wizard is expected to re-trigger Bootstrap after the
-//     user provides the missing credential.
+//   - RegistrationPromptError: worker gives up because the condition cannot be
+//     fixed without user input. The CLI / onboarding wizard is expected to
+//     re-trigger Bootstrap after the user provides the missing credential.
+//   - BrowserConfirmationError: worker sleeps until the current device code
+//     expires, then retries to request a fresh code without tight-looping.
 //
 // Other failures (network down, 5xx, timeouts) keep looping.
 func (s *Service) StartRegistrationWorker(ctx context.Context, opts BootstrapOptions) {
@@ -296,6 +330,17 @@ func (s *Service) StartRegistrationWorker(ctx context.Context, opts BootstrapOpt
 			s.logger.Warn("device registration blocked on user input — run `aima device register` after providing the credential",
 				"kind", prompt.Kind, "detail", prompt.Detail)
 			return
+		}
+		var browser *BrowserConfirmationError
+		if errors.As(err, &browser) {
+			wait := browserConfirmationRetryDelay(s.loadState(ctx).PendingBrowserConfirmation, s.now())
+			s.logger.Warn("device registration blocked on browser confirmation",
+				"detail", browser.Error(), "device_code", browser.DeviceCode, "retry_in", wait.String())
+			if err := sleepContext(ctx, wait); err != nil {
+				return
+			}
+			backoff = minRegistrationBackoff
+			continue
 		}
 		s.logger.Warn("device registration failed; retrying",
 			"error", err, "retry_in", backoff.String())

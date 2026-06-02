@@ -119,12 +119,14 @@ variants:
     format: safetensors
     default_config:
       gpu_memory_utilization: 0.50
-      max_model_len: 8192
+      max_model_len: 16384
       num_gpu_blocks_override: 256
       max_num_seqs: 1
       enforce_eager: true
       quantization: gptq
       dtype: float16
+      enable_auto_tool_choice: true
+      tool_call_parser: hermes
       block_size: 32
       swap_space: 0
       port: 32102

@@ -28,6 +28,10 @@ chmod 0644 /etc/aima/data-dir
 
 find /var/lib/aima -maxdepth 2 \( -name 'ui-cache' -o -name '.ui-cache' -o -name 'web-cache' -o -name '.web-cache' \) -exec rm -rf {} + 2>/dev/null || true
 
+if [ -L /usr/local/bin/kubectl ] && [ "$(readlink -f /usr/local/bin/kubectl 2>/dev/null || true)" = "/usr/local/bin/aima" ]; then
+  rm -f /usr/local/bin/kubectl
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
   systemctl reset-failed aima.service >/dev/null 2>&1 || true

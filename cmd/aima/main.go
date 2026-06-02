@@ -138,7 +138,10 @@ func run() error {
 			dockerRt = runtime.NewDockerRuntime(cat.EngineAssets)
 		}
 		if runtime.K3SAvailable(ctx, k3sClient) {
-			k3sRt = runtime.NewK3SRuntime(k3sClient, runtime.WithEngineAssets(cat.EngineAssets))
+			k3sRt = runtime.NewCachedListRuntime(
+				runtime.NewK3SRuntime(k3sClient, runtime.WithEngineAssets(cat.EngineAssets)),
+				3*time.Second,
+			)
 		}
 	}
 	rt := selectDefaultRuntime(k3sRt, dockerRt, nativeRt)

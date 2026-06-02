@@ -2471,8 +2471,8 @@ body {
   min-height: 0;
 }
 .support-content-scroll {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto auto minmax(220px, 1fr) auto;
   gap: 12px;
   flex: 1;
   min-height: 0;
@@ -2686,29 +2686,32 @@ body {
   background: var(--bg-secondary);
   border: var(--panel-border);
   border-radius: var(--radius-sm);
-  min-height: 96px;
-  max-height: clamp(120px, 22vh, 260px);
+  min-height: 220px;
+  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 .support-msg {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  display: flex;
   align-items: start;
-  column-gap: 8px;
+  gap: 8px;
   padding: 10px 12px;
   font-size: 13px;
   color: var(--text);
   background: var(--bg-panel);
   border-radius: 6px;
   line-height: 1.45;
-  min-height: 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 .support-msg-body {
   display: block;
+  flex: 1 1 auto;
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  word-break: break-word;
   line-height: 1.45;
 }
 .support-msg .msg-time {
@@ -2721,6 +2724,7 @@ body {
   align-items: center;
   justify-content: center;
   align-self: start;
+  flex: 0 0 auto;
   font-size: 10px;
   text-transform: uppercase;
   font-weight: 600;
@@ -6484,6 +6488,8 @@ function aimaApp() {
 
     // Polling intervals
     _timers: [],
+    _pollSystemStatusPromise: null,
+    _pollDeploymentsPromise: null,
 
     init() {
       this.messages = [];
@@ -6500,8 +6506,8 @@ function aimaApp() {
       this._timers.push(setInterval(() => this.pollSystemStatus(), 5000));
       this._timers.push(setInterval(() => this.pollEngines(), 30000));
       this._timers.push(setInterval(() => this.pollModels(), 30000));
-      this._deployPollMs = 1000;
-      this._deployTimer = setInterval(() => this.pollDeployments(), 1000);
+      this._deployPollMs = 10000;
+      this._deployTimer = setInterval(() => this.pollDeployments(), 10000);
       this._timers.push(setInterval(() => this.pollFleet(), 10000));
       this._timers.push(setInterval(() => this.pollAgentInfo(), 30000));
 
@@ -7594,6 +7600,16 @@ function aimaApp() {
     // ── Polling functions ──
 
     async pollSystemStatus() {
+      if (this._pollSystemStatusPromise) return this._pollSystemStatusPromise;
+      this._pollSystemStatusPromise = this._pollSystemStatusOnce();
+      try {
+        return await this._pollSystemStatusPromise;
+      } finally {
+        this._pollSystemStatusPromise = null;
+      }
+    },
+
+    async _pollSystemStatusOnce() {
       const data = await this.callTool('system.status');
       if (!data || data._err) return;
       this.systemOnline = true;
@@ -7699,6 +7715,7 @@ function aimaApp() {
       if (!data || typeof data !== 'object') return;
       this.supportState = this.mergeSupportState(data);
       this.supportConnected = data.enabled === true && data.registered === true;
+      this.syncSupportBrowserConfirmationFromStatus(data);
       if (this.supportConnected && !this.supportState.needsBrowserConfirmation && this.supportBrowserConfirmation) {
         this.supportBrowserConfirmation = null;
         this.supportPageConnecting = false;
@@ -7897,6 +7914,41 @@ function aimaApp() {
       }
     },
 
+    syncSupportBrowserConfirmationFromStatus(data) {
+      const support = this.supportState || {};
+      const hasNeedsFlag = data && data.needs_browser_confirmation !== undefined;
+      const needsBrowserConfirmation = hasNeedsFlag
+        ? data.needs_browser_confirmation === true
+        : support.needsBrowserConfirmation === true;
+      if (!needsBrowserConfirmation) {
+        if (hasNeedsFlag || this.supportConnected || support.registered) {
+          this.supportBrowserConfirmation = null;
+        }
+        return;
+      }
+
+      const detail = data.detail !== undefined ? data.detail : support.browserConfirmDetail;
+      const userCode = data.user_code !== undefined ? data.user_code : support.browserConfirmUserCode;
+      const deviceCode = data.device_code !== undefined ? data.device_code : support.browserConfirmDeviceCode;
+      const verificationURI = data.verification_uri !== undefined ? data.verification_uri : support.verificationURI;
+      const verificationURIComplete = data.verification_uri_complete !== undefined
+        ? data.verification_uri_complete
+        : support.verificationURIComplete;
+      const expiresIn = data.expires_in !== undefined ? data.expires_in : support.browserExpiresIn;
+      const interval = data.interval !== undefined ? data.interval : support.browserInterval;
+      if (!userCode && !deviceCode && !verificationURI && !verificationURIComplete) return;
+
+      this.supportBrowserConfirmation = {
+        detail: detail || '',
+        userCode: userCode || '',
+        deviceCode: deviceCode || '',
+        verificationURI: verificationURI || '',
+        verificationURIComplete: verificationURIComplete || '',
+        expiresIn: Number(expiresIn || 0),
+        interval: Number(interval || 0)
+      };
+    },
+
     supportBrowserConfirmationText() {
       const data = this.supportBrowserConfirmation || this.supportState;
       if (!data) return '';
@@ -8030,8 +8082,32 @@ function aimaApp() {
       const msg = String(text || '').trim();
       if (!msg) return;
       const kind = type || 'info';
+      this.appendSupportPageEntry({
+        text: msg,
+        type: kind
+      });
+    },
+
+    appendSupportPageEntry(entry) {
+      const msg = String((entry && entry.text) || '').trim();
+      if (!msg) return;
+      const kind = (entry && entry.type) || 'info';
+      const key = entry && entry.key;
       if (kind === 'browser_confirmation') {
         this.removeSupportPageMessagesByType('browser_confirmation');
+      }
+      if (key) {
+        const idx = this.supportPageFeed.findIndex(item => item.key === key);
+        if (idx >= 0) {
+          this.supportPageFeed.splice(idx, 1, {
+            ...this.supportPageFeed[idx],
+            text: msg,
+            type: kind,
+            key
+          });
+          this.scrollSupportPage();
+          return;
+        }
       }
       const tail = this.supportPageFeed[this.supportPageFeed.length - 1];
       if (tail && tail.type === kind && tail.text === msg) {
@@ -8042,7 +8118,8 @@ function aimaApp() {
       this.supportPageFeed.push({
         id: 'support-local-' + this._supportPageLocalSeq,
         text: msg,
-        type: kind
+        type: kind,
+        key: key || ''
       });
       this.scrollSupportPage();
     },
@@ -8078,7 +8155,7 @@ function aimaApp() {
         let text = 'Support task active: ' + (task.task_id || 'pending');
         if (task.status) text += ' (' + task.status + ')';
         if (task.target) text += ' - ' + task.target;
-        this.appendSupportPageMessage(text, 'command_intent');
+        this.appendSupportPageEntry({ text, type: 'command_intent', key: 'active-task' });
         this._supportPageSeen.activeTask = activeSig;
         this.supportPageAwaitingDescription = false;
       } else if (!activeSig) {
@@ -8090,7 +8167,7 @@ function aimaApp() {
         const task = support.lastTask;
         let text = 'Support task ' + (task.task_id || 'pending') + ' finished';
         if (task.status) text += ': ' + task.status;
-        this.appendSupportPageMessage(text, 'task_completion');
+        this.appendSupportPageEntry({ text, type: 'task_completion', key: 'last-task' });
         this._supportPageSeen.lastTask = lastTaskSig;
       }
 
@@ -8098,7 +8175,8 @@ function aimaApp() {
         ? support.deviceId + '|' + (support.isBound ? 'bound' : 'unbound')
         : '';
       if (connectionSig && connectionSig !== this._supportPageSeen.connection) {
-        this.appendSupportPageMessage(this.formatSupportLinkedMessage({
+        this.appendSupportPageEntry({
+          text: this.formatSupportLinkedMessage({
           device_id: support.deviceId,
           budget_usd: support.budgetUSD,
           spent_usd: support.spentUSD,
@@ -8106,7 +8184,10 @@ function aimaApp() {
           used_tasks: support.usedTasks,
           is_bound: support.isBound,
           referral_code: support.referralCode
-        }), 'complete');
+          }),
+          type: 'complete',
+          key: 'connection'
+        });
         if (!support.activeTask) {
           this.supportPageAwaitingDescription = true;
         }
@@ -8714,6 +8795,16 @@ function aimaApp() {
     },
 
     async pollDeployments() {
+      if (this._pollDeploymentsPromise) return this._pollDeploymentsPromise;
+      this._pollDeploymentsPromise = this._pollDeploymentsOnce();
+      try {
+        return await this._pollDeploymentsPromise;
+      } finally {
+        this._pollDeploymentsPromise = null;
+      }
+    },
+
+    async _pollDeploymentsOnce() {
       const data = await this.callTool('deploy.list');
       if (!data || data._err) return;
       const list = Array.isArray(data) ? data : [];
@@ -8779,7 +8870,7 @@ function aimaApp() {
     },
 
     _adjustDeployPoll(fast) {
-      const want = fast ? 500 : 1000;
+      const want = fast ? 3000 : 10000;
       if (this._deployPollMs === want) return;
       this._deployPollMs = want;
       if (this._deployTimer) clearInterval(this._deployTimer);
@@ -9498,13 +9589,13 @@ function aimaApp() {
         return;
       }
       if (data.created) {
-        this.appendSupportPageMessage(this.formatSupportTaskMessage(data), 'task_completion');
-        this.appendSupportPageMessage(this.t('support_waiting'), 'info');
+        this.appendSupportPageEntry({ text: this.formatSupportTaskMessage(data), type: 'task_completion', key: 'active-task' });
+        this.appendSupportPageEntry({ text: this.t('support_waiting'), type: 'info', key: 'waiting' });
       } else if (data.reused_active_task) {
-        this.appendSupportPageMessage(this.formatSupportTaskMessage(data), 'command_intent');
-        this.appendSupportPageMessage(this.t('support_waiting'), 'info');
+        this.appendSupportPageEntry({ text: this.formatSupportTaskMessage(data), type: 'command_intent', key: 'active-task' });
+        this.appendSupportPageEntry({ text: this.t('support_waiting'), type: 'info', key: 'waiting' });
       } else {
-        this.appendSupportPageMessage(this.formatSupportLinkedMessage(data), 'complete');
+        this.appendSupportPageEntry({ text: this.formatSupportLinkedMessage(data), type: 'complete', key: 'connection' });
         this.supportPageAwaitingDescription = true;
       }
       await this.pollSystemStatus();
@@ -9543,11 +9634,11 @@ function aimaApp() {
         return;
       }
       if (data.reused_active_task) {
-        this.appendSupportPageMessage(this.formatSupportTaskMessage(data), 'command_intent');
-        this.appendSupportPageMessage(this.t('support_waiting'), 'info');
+        this.appendSupportPageEntry({ text: this.formatSupportTaskMessage(data), type: 'command_intent', key: 'active-task' });
+        this.appendSupportPageEntry({ text: this.t('support_waiting'), type: 'info', key: 'waiting' });
         this.supportPageAwaitingDescription = false;
       } else {
-        this.appendSupportPageMessage(this.formatSupportLinkedMessage(data), 'complete');
+        this.appendSupportPageEntry({ text: this.formatSupportLinkedMessage(data), type: 'complete', key: 'connection' });
         this.supportPageAwaitingDescription = true;
       }
       await this.pollSystemStatus();
@@ -9612,11 +9703,11 @@ function aimaApp() {
       this.supportPageAwaitingDescription = false;
       this.supportPageGuidedHint = '';
       if (data.created) {
-        this.appendSupportPageMessage(this.formatSupportTaskMessage(data), 'task_completion');
-        this.appendSupportPageMessage(this.t('support_waiting'), 'info');
+        this.appendSupportPageEntry({ text: this.formatSupportTaskMessage(data), type: 'task_completion', key: 'active-task' });
+        this.appendSupportPageEntry({ text: this.t('support_waiting'), type: 'info', key: 'waiting' });
       } else if (data.reused_active_task) {
-        this.appendSupportPageMessage(this.formatSupportTaskMessage(data), 'command_intent');
-        this.appendSupportPageMessage(this.t('support_waiting'), 'info');
+        this.appendSupportPageEntry({ text: this.formatSupportTaskMessage(data), type: 'command_intent', key: 'active-task' });
+        this.appendSupportPageEntry({ text: this.t('support_waiting'), type: 'info', key: 'waiting' });
       }
       this.supportPageDesc = '';
       await this.pollSystemStatus();

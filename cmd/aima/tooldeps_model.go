@@ -113,6 +113,9 @@ func inferModelClass(ma *knowledge.ModelAsset, variant *knowledge.ModelVariant) 
 	if ma == nil {
 		return "unknown"
 	}
+	if class := strings.ToLower(strings.TrimSpace(ma.Metadata.ModelClass)); class != "" {
+		return class
+	}
 	switch strings.ToLower(strings.TrimSpace(ma.Metadata.Type)) {
 	case "asr", "tts":
 		if variant != nil && strings.EqualFold(strings.TrimSpace(variant.Format), "onnx") {

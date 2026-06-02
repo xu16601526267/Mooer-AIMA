@@ -503,6 +503,67 @@ func TestServiceAskForHelpBrowserConfirmationAndRun(t *testing.T) {
 	}
 }
 
+func TestServiceAskForHelpRefreshesExpiredBrowserConfirmation(t *testing.T) {
+	t.Parallel()
+
+	var registerCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/devices/self-register", func(w http.ResponseWriter, r *http.Request) {
+		registerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"detail":                    "browser confirmation required to recover existing device credentials",
+			"reauth_method":             "browser_confirmation",
+			"device_id":                 "dev-existing",
+			"user_code":                 fmt.Sprintf("CODE-%d", registerCalls),
+			"device_code":               fmt.Sprintf("flow-%d", registerCalls),
+			"verification_uri":          "https://example.com/device",
+			"verification_uri_complete": fmt.Sprintf("https://example.com/device?user_code=CODE-%d", registerCalls),
+			"expires_in":                2,
+			"interval":                  1,
+		}); err != nil {
+			t.Fatalf("encode browser confirmation response: %v", err)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	store := newMemoryStore()
+	ctx := context.Background()
+	_ = store.SetConfig(ctx, ConfigEndpoint, server.URL)
+	_ = store.SetConfig(ctx, ConfigInviteCode, "invite-123")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmDetail, "browser confirmation required")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmDeviceID, "dev-existing")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmUserCode, "OLD-CODE")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmDeviceCode, "old-flow")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmVerificationURI, "https://example.com/device")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmVerificationURIComplete, "https://example.com/device?user_code=OLD-CODE")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmExpiresIn, "2")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmInterval, "1")
+	_ = store.SetConfig(ctx, configStateBrowserConfirmCreatedAt, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	_ = store.SetConfig(ctx, configStateBrowserConfirmExpiresAt, time.Now().Add(-30*time.Second).UTC().Format(time.RFC3339))
+
+	svc := NewService(store, WithHTTPClient(server.Client()))
+	raw, err := svc.AskForHelpJSON(ctx, "", "", "", "", "", "")
+	if err != nil {
+		t.Fatalf("AskForHelpJSON: %v", err)
+	}
+	var result AskResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal ask result: %v", err)
+	}
+	if result.BrowserConfirmDeviceCode != "flow-1" || result.BrowserConfirmUserCode != "CODE-1" {
+		t.Fatalf("expected refreshed browser confirmation payload, got %+v", result)
+	}
+	if registerCalls != 1 {
+		t.Fatalf("self-register calls = %d, want 1", registerCalls)
+	}
+	if got := store.mustGet(configStateBrowserConfirmDeviceCode); got != "flow-1" {
+		t.Fatalf("stored device_code = %q, want flow-1", got)
+	}
+}
+
 func TestServiceGoUXManifestJSON(t *testing.T) {
 	t.Parallel()
 

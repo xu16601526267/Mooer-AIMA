@@ -273,8 +273,12 @@ func detectHWProfile(ctx context.Context, cat *knowledge.Catalog) string {
 // If "kubectl" is in PATH, uses it directly. Otherwise, looks for the k3s binary
 // in dist/ or PATH and uses its built-in kubectl (k3s kubectl ...).
 func newK3SClient(dataDir string) *k3s.Client {
-	if _, err := exec.LookPath("kubectl"); err == nil {
-		return k3s.NewClient()
+	badKubectl := false
+	if p, err := usableKubectlPath(); err == nil {
+		return k3s.NewClient(k3s.WithKubectl(p))
+	} else if p != "" {
+		badKubectl = true
+		slog.Warn("ignoring unusable kubectl", "path", p, "error", err)
 	}
 	// kubectl not in PATH — try k3s binary directly
 	platform := goruntime.GOOS + "-" + goruntime.GOARCH
@@ -285,7 +289,40 @@ func newK3SClient(dataDir string) *k3s.Client {
 	if p, err := exec.LookPath("k3s"); err == nil {
 		return k3s.NewClient(k3s.WithK3SBinary(p))
 	}
+	if badKubectl {
+		return k3s.NewClient(k3s.WithKubectl(filepath.Join(dataDir, "dist", "kubectl-disabled")))
+	}
 	return k3s.NewClient()
+}
+
+func usableKubectlPath() (string, error) {
+	p, err := exec.LookPath("kubectl")
+	if err != nil {
+		return "", err
+	}
+	if kubectlResolvesToCurrentExecutable(p) {
+		return p, fmt.Errorf("kubectl resolves to current aima executable")
+	}
+	return p, nil
+}
+
+func kubectlResolvesToCurrentExecutable(path string) bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if sameFile(path, exe) {
+		return true
+	}
+	realPath, pathErr := filepath.EvalSymlinks(path)
+	realExe, exeErr := filepath.EvalSymlinks(exe)
+	return pathErr == nil && exeErr == nil && sameFile(realPath, realExe)
+}
+
+func sameFile(a, b string) bool {
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	return aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo)
 }
 
 // buildNativeRuntime constructs a native process runtime for the current platform.

@@ -4,6 +4,9 @@ metadata:
   type: asr
   family: mooer
   parameter_count: "1.5B"
+  # Consumed by the AIBook speech stack; keep it in speech components instead
+  # of the standalone one-click deploy model list.
+  model_class: component
   released_at: "2024-10"
 storage:
   formats: [safetensors]

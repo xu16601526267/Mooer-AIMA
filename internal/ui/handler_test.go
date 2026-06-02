@@ -251,6 +251,62 @@ func TestRegisterRoutes_IndexIncludesDeploymentStageFeedback(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutes_IndexThrottlesPolling(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	RegisterRoutes(nil)(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	for _, token := range []string{
+		"_pollSystemStatusPromise: null",
+		"_pollDeploymentsPromise: null",
+		"this._deployTimer = setInterval(() => this.pollDeployments(), 10000);",
+		"async _pollSystemStatusOnce()",
+		"async _pollDeploymentsOnce()",
+		"const want = fast ? 3000 : 10000;",
+	} {
+		if !strings.Contains(body, token) {
+			t.Fatalf("body missing %q", token)
+		}
+	}
+}
+
+func TestRegisterRoutes_IndexIncludesSupportBrowserConfirmationRefresh(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	RegisterRoutes(nil)(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	for _, token := range []string{
+		"syncSupportBrowserConfirmationFromStatus(data);",
+		"syncSupportBrowserConfirmationFromStatus(data) {",
+		"data.user_code !== undefined ? data.user_code : support.browserConfirmUserCode",
+		"data.verification_uri_complete !== undefined",
+	} {
+		if !strings.Contains(body, token) {
+			t.Fatalf("body missing %q", token)
+		}
+	}
+}
+
 func TestRegisterRoutes_IndexIncludesDirectModeRoutingAndModelCards(t *testing.T) {
 	t.Parallel()
 

@@ -996,6 +996,36 @@ func TestRealCatalogSGLangKTUsesAppImageExtractAndRunFallback(t *testing.T) {
 	}
 }
 
+func TestRealCatalogQwen38BAIBookEnablesToolCallingByDefault(t *testing.T) {
+	cat, err := LoadCatalog(catalogFS())
+	if err != nil {
+		t.Fatalf("LoadCatalog(real FS): %v", err)
+	}
+
+	hw := HardwareInfo{
+		GPUArch:       "MUSA",
+		GPUVRAMMiB:    31778,
+		UnifiedMemory: true,
+		CPUArch:       "arm64",
+		Platform:      "linux/arm64",
+		RuntimeType:   "native",
+	}
+	resolved, err := cat.Resolve(hw, "qwen3-8b", "vllm-musa", nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if got := resolved.Config["enable_auto_tool_choice"]; got != true {
+		t.Fatalf("enable_auto_tool_choice = %v, want true", got)
+	}
+	if got := resolved.Config["tool_call_parser"]; got != "hermes" {
+		t.Fatalf("tool_call_parser = %v, want hermes", got)
+	}
+	if got := resolved.Config["max_model_len"]; got != 16384 {
+		t.Fatalf("max_model_len = %v, want 16384", got)
+	}
+}
+
 func TestResolveUnifiedMemoryFilter(t *testing.T) {
 	unified := true
 	discrete := false

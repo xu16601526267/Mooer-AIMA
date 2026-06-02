@@ -190,42 +190,29 @@ func TestBootstrap_ConflictSurfacesPromptError(t *testing.T) {
 	}
 }
 
-// TestBootstrap_NoInviteLeavesUnregistered verifies offline-first: when no
-// invite code is configured anywhere (opts, env, or config), Bootstrap must
-// short-circuit with a RegistrationPromptError and leave registration_state
-// as "unregistered" — NOT auto-register against a built-in default code
-// (previous behavior that violated INV-8 offline-first).
-func TestBootstrap_NoInviteLeavesUnregistered(t *testing.T) {
+func TestBootstrap_DefaultInviteCodeRegistersWhenNoInviteConfigured(t *testing.T) {
 	// Cannot run in parallel: we rely on no env var leakage.
-	serverHit := false
-	fx := newBootstrapFixture(t, func(w http.ResponseWriter, _ *http.Request) {
-		serverHit = true
-		http.Error(w, `{"detail":"should not be called"}`, http.StatusInternalServerError)
-	})
+	fx := newBootstrapFixture(t, successRegisterHandler(t, "dev-default-invite"))
 
 	// Defensively unset any env-level invite sources — these tests may be run
 	// in an environment that happens to have them set.
 	t.Setenv(EnvInviteCode, "")
 	t.Setenv("AIMA_SUPPORT_INVITE_CODE", "")
 
-	_, err := fx.svc.Bootstrap(context.Background(), BootstrapOptions{})
-	var prompt *RegistrationPromptError
-	if !errors.As(err, &prompt) {
-		t.Fatalf("expected RegistrationPromptError, got %T: %v", err, err)
+	res, err := fx.svc.Bootstrap(context.Background(), BootstrapOptions{})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
 	}
-	if prompt.Kind != RegistrationPromptInviteOrWorker {
-		t.Errorf("prompt kind = %q, want %q", prompt.Kind, RegistrationPromptInviteOrWorker)
+	if res.DeviceID != "dev-default-invite" {
+		t.Errorf("device_id = %q, want dev-default-invite", res.DeviceID)
 	}
-	if serverHit {
-		t.Error("Bootstrap must not hit /self-register when no invite is configured")
+	if fx.capturedInvite != DefaultInviteCode {
+		t.Errorf("server saw invite_code = %q, want %q", fx.capturedInvite, DefaultInviteCode)
 	}
 
 	got := fx.store.mustGet(cloud.ConfigRegistrationState)
-	if got == cloud.StateRegistered {
-		t.Errorf("registration_state = %q, must not be registered without an invite", got)
-	}
-	if got == cloud.StateFailed {
-		t.Errorf("registration_state = %q, should stay unregistered (missing config, not failed attempt)", got)
+	if got != cloud.StateRegistered {
+		t.Errorf("registration_state = %q, want registered", got)
 	}
 }
 
@@ -341,6 +328,59 @@ func TestStartRegistrationWorker_StopsOnPromptError(t *testing.T) {
 	}
 }
 
+func TestStartRegistrationWorker_RetriesBrowserConfirmationAfterExpiry(t *testing.T) {
+	t.Parallel()
+	var attempts int
+	fx := newBootstrapFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts > 1 {
+			successRegisterHandler(t, "dev-after-browser-expiry")(w, nil)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{
+			"detail":"browser confirmation required to recover existing device credentials",
+			"reauth_method":"browser_confirmation",
+			"device_id":"dev-bound",
+			"user_code":"ABCD-EFGH",
+			"device_code":"flow-code",
+			"verification_uri":"https://example.com/device",
+			"verification_uri_complete":"https://example.com/device?user_code=ABCD-EFGH",
+			"expires_in":1,
+			"interval":5
+		}`))
+	})
+
+	origMin := minRegistrationBackoffForTest()
+	setMinRegistrationBackoffForTest(10 * time.Millisecond)
+	defer setMinRegistrationBackoffForTest(origMin)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		fx.svc.StartRegistrationWorker(ctx, BootstrapOptions{InviteCode: "INV"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2500 * time.Millisecond):
+		t.Fatal("worker should retry after browser confirmation expires")
+	}
+	if attempts != 2 {
+		t.Errorf("expected 2 attempts with one browser-confirmation refresh, got %d", attempts)
+	}
+	if got := fx.store.mustGet(configStateBrowserConfirmDeviceCode); got != "" {
+		t.Errorf("stored browser confirmation device_code = %q, want cleared after success", got)
+	}
+	if got := fx.store.mustGet(cloud.ConfigRegistrationState); got != cloud.StateRegistered {
+		t.Errorf("registration_state = %q, want registered after retry", got)
+	}
+}
+
 func TestStartRegistrationWorker_ExitsOnContextCancel(t *testing.T) {
 	t.Parallel()
 	fx := newBootstrapFixture(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -392,4 +432,3 @@ func TestTokenExpiringSoon(t *testing.T) {
 		})
 	}
 }
-

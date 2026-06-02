@@ -21,7 +21,7 @@ const (
 	ConfigWorkerCode = "support.worker_code"
 
 	DefaultEndpoint = "https://aimaserver.com"
-	// Empty: offline-first (INV-8) — no invite, no network.
+	// Built-in cloud channel used when no explicit invite is configured.
 	DefaultInviteCode = "channel-aima"
 
 	configStateDeviceID                              = "support.state.device_id"
@@ -30,6 +30,9 @@ const (
 	configStateReferralCode                          = "support.state.referral_code"
 	configStateShareText                             = "support.state.share_text"
 	configStateTokenExpiresAt                        = "support.state.token_expires_at"
+	configStateTokenKind                             = "support.state.token_kind"
+	configStateTokenPersistence                      = "support.state.token_persistence"
+	configStatePersistentToken                       = "support.state.persistent_token_fallback_enabled"
 	configStatePollIntervalSec                       = "support.state.poll_interval_seconds"
 	configStateMaxTasks                              = "support.state.max_tasks"
 	configStateUsedTasks                             = "support.state.used_tasks"
@@ -58,6 +61,14 @@ const (
 	configStateBrowserConfirmVerificationURIComplete = "support.state.browser_confirmation.verification_uri_complete"
 	configStateBrowserConfirmExpiresIn               = "support.state.browser_confirmation.expires_in"
 	configStateBrowserConfirmInterval                = "support.state.browser_confirmation.interval"
+	configStateBrowserConfirmCreatedAt               = "support.state.browser_confirmation.created_at"
+	configStateBrowserConfirmExpiresAt               = "support.state.browser_confirmation.expires_at"
+	configIdentityDeviceID                           = "support.identity.device_id"
+	configIdentityKeyID                              = "support.identity.key_id"
+	configIdentityPrivateKeyPEM                      = "support.identity.private_key_pem"
+	configIdentityPublicKeyPEM                       = "support.identity.public_key_pem"
+	configIdentityAlgorithm                          = "support.identity.algorithm"
+	configIdentityStorageClass                       = "support.identity.storage_class"
 
 	defaultPollInterval     = 5 * time.Second
 	defaultProgressInterval = 5 * time.Second
@@ -225,6 +236,8 @@ type BrowserConfirmationError struct {
 	VerificationURIComplete string
 	ExpiresIn               int
 	Interval                int
+	CreatedAt               string
+	ExpiresAt               string
 }
 
 func (e *RegistrationPromptError) Error() string {
@@ -251,10 +264,17 @@ func (e *BrowserConfirmationError) Error() string {
 	if e == nil {
 		return "browser confirmation required"
 	}
-	if e.Detail != "" {
-		return e.Detail
+	detail := strings.TrimSpace(e.Detail)
+	if detail == "" {
+		detail = "browser confirmation required to recover existing device credentials"
 	}
-	return "browser confirmation required to recover existing device credentials"
+	if e.VerificationURIComplete != "" {
+		return fmt.Sprintf("%s: open %s", detail, e.VerificationURIComplete)
+	}
+	if e.VerificationURI != "" && e.UserCode != "" {
+		return fmt.Sprintf("%s: open %s and enter code %s", detail, e.VerificationURI, e.UserCode)
+	}
+	return detail
 }
 
 // Option customizes a Service.
@@ -749,21 +769,30 @@ func (s *Service) Run(ctx context.Context, opts RunOptions) error {
 }
 
 type deviceState struct {
-	DeviceID                   string
-	Token                      string
-	RecoveryCode               string
-	ReferralCode               string
-	ShareText                  string
-	TokenExpiresAt             string
-	PollIntervalSeconds        int
-	MaxTasks                   int
-	UsedTasks                  int
-	BudgetUSD                  float64
-	SpentUSD                   float64
-	BudgetStatus               string
-	IsBound                    bool
-	ReferralCount              int
-	PendingBrowserConfirmation *browserConfirmationState
+	DeviceID                       string
+	Token                          string
+	RecoveryCode                   string
+	ReferralCode                   string
+	ShareText                      string
+	TokenExpiresAt                 string
+	TokenKind                      string
+	TokenPersistence               string
+	PersistentTokenFallbackEnabled bool
+	IdentityDeviceID               string
+	IdentityKeyID                  string
+	IdentityPrivateKeyPEM          string
+	IdentityPublicKeyPEM           string
+	IdentityAlgorithm              string
+	IdentityStorageClass           string
+	PollIntervalSeconds            int
+	MaxTasks                       int
+	UsedTasks                      int
+	BudgetUSD                      float64
+	SpentUSD                       float64
+	BudgetStatus                   string
+	IsBound                        bool
+	ReferralCount                  int
+	PendingBrowserConfirmation     *browserConfirmationState
 }
 
 type activeTaskResponse struct {
@@ -779,15 +808,18 @@ type deviceTaskResponse struct {
 }
 
 type selfRegisterResponse struct {
-	DeviceID            string     `json:"device_id"`
-	Token               string     `json:"token"`
-	RecoveryCode        string     `json:"recovery_code"`
-	TokenExpiresAt      string     `json:"token_expires_at"`
-	PollIntervalSeconds int        `json:"poll_interval_seconds"`
-	Budget              budgetInfo `json:"budget"`
-	ReferralCode        string     `json:"referral_code"`
-	ShareText           string     `json:"share_text"`
-	DisplayLanguage     string     `json:"display_language,omitempty"`
+	DeviceID                       string     `json:"device_id"`
+	Token                          string     `json:"token"`
+	RecoveryCode                   string     `json:"recovery_code"`
+	TokenExpiresAt                 string     `json:"token_expires_at"`
+	TokenKind                      string     `json:"token_kind"`
+	TokenPersistence               string     `json:"token_persistence"`
+	PersistentTokenFallbackEnabled bool       `json:"persistent_token_fallback_enabled"`
+	PollIntervalSeconds            int        `json:"poll_interval_seconds"`
+	Budget                         budgetInfo `json:"budget"`
+	ReferralCode                   string     `json:"referral_code"`
+	ShareText                      string     `json:"share_text"`
+	DisplayLanguage                string     `json:"display_language,omitempty"`
 }
 
 type deviceAccountResponse struct {
@@ -812,6 +844,8 @@ type browserConfirmationState struct {
 	VerificationURIComplete string
 	ExpiresIn               int
 	Interval                int
+	CreatedAt               string
+	ExpiresAt               string
 }
 
 type budgetInfo struct {
@@ -826,8 +860,11 @@ type budgetInfo struct {
 }
 
 type renewTokenResponse struct {
-	Token          string `json:"token"`
-	TokenExpiresAt string `json:"token_expires_at"`
+	Token                          string `json:"token"`
+	TokenExpiresAt                 string `json:"token_expires_at"`
+	TokenKind                      string `json:"token_kind"`
+	TokenPersistence               string `json:"token_persistence"`
+	PersistentTokenFallbackEnabled bool   `json:"persistent_token_fallback_enabled"`
 }
 
 type pollResponse struct {
@@ -876,6 +913,8 @@ type deviceFlowPollResponse struct {
 	Token                          string     `json:"token"`
 	RecoveryCode                   string     `json:"recovery_code"`
 	TokenExpiresAt                 string     `json:"token_expires_at"`
+	TokenKind                      string     `json:"token_kind"`
+	TokenPersistence               string     `json:"token_persistence"`
 	PollIntervalSeconds            int        `json:"poll_interval_seconds"`
 	PersistentTokenFallbackEnabled bool       `json:"persistent_token_fallback_enabled"`
 	Budget                         budgetInfo `json:"budget"`
@@ -908,6 +947,12 @@ func (s *Service) waitForBrowserConfirmation(ctx context.Context, endpoint strin
 		interval = 2
 	}
 	for {
+		if browserConfirmationExpired(pending, s.now()) {
+			state := s.loadState(ctx)
+			state.PendingBrowserConfirmation = nil
+			_ = s.saveState(ctx, state)
+			return fmt.Errorf("browser confirmation expired")
+		}
 		resp, err := s.pollDeviceFlow(ctx, endpoint, pending.DeviceCode)
 		if err != nil {
 			return err
@@ -924,14 +969,25 @@ func (s *Service) waitForBrowserConfirmation(ctx context.Context, endpoint strin
 			state.Token = strings.TrimSpace(resp.Token)
 			state.RecoveryCode = strings.TrimSpace(resp.RecoveryCode)
 			state.TokenExpiresAt = strings.TrimSpace(resp.TokenExpiresAt)
+			state.TokenKind = strings.TrimSpace(resp.TokenKind)
+			state.TokenPersistence = strings.TrimSpace(resp.TokenPersistence)
+			state.PersistentTokenFallbackEnabled = resp.PersistentTokenFallbackEnabled
 			if resp.PollIntervalSeconds > 0 {
 				state.PollIntervalSeconds = resp.PollIntervalSeconds
 			}
 			applyDeviceFlowSummary(&state, &resp)
+			state.PendingBrowserConfirmation = nil
+			if isNonPersistentToken(state.TokenPersistence) {
+				next, ok, err := s.ensureIdentitySession(ctx, endpoint, state)
+				if err != nil {
+					s.logger.Warn("support identity session setup after browser confirmation failed; continuing with short-lived token", "error", err)
+				} else if ok {
+					state = next
+				}
+			}
 			if err := s.refreshAccountSummary(ctx, endpoint, &state); err != nil {
 				s.logger.Warn("support account summary refresh after browser confirmation failed", "device_id", state.DeviceID, "error", err)
 			}
-			state.PendingBrowserConfirmation = nil
 			return s.saveState(ctx, state)
 		case "expired":
 			state := s.loadState(ctx)
@@ -957,15 +1013,22 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 	}
 
 	if pending := state.PendingBrowserConfirmation; pending != nil && strings.TrimSpace(pending.DeviceCode) != "" {
-		return state, endpoint, nil, &BrowserConfirmationError{
-			Detail:                  pending.Detail,
-			DeviceID:                pending.DeviceID,
-			UserCode:                pending.UserCode,
-			DeviceCode:              pending.DeviceCode,
-			VerificationURI:         pending.VerificationURI,
-			VerificationURIComplete: pending.VerificationURIComplete,
-			ExpiresIn:               pending.ExpiresIn,
-			Interval:                pending.Interval,
+		if browserConfirmationExpired(pending, s.now()) {
+			state.PendingBrowserConfirmation = nil
+			if err := s.saveState(ctx, state); err != nil {
+				return deviceState{}, "", nil, err
+			}
+		} else {
+			return state, endpoint, nil, &BrowserConfirmationError{
+				Detail:                  pending.Detail,
+				DeviceID:                pending.DeviceID,
+				UserCode:                pending.UserCode,
+				DeviceCode:              pending.DeviceCode,
+				VerificationURI:         pending.VerificationURI,
+				VerificationURIComplete: pending.VerificationURIComplete,
+				ExpiresIn:               pending.ExpiresIn,
+				Interval:                pending.Interval,
+			}
 		}
 	}
 
@@ -974,6 +1037,15 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 			return state, endpoint, nil, nil
 		} else if !isAuthError(err) {
 			return deviceState{}, "", nil, err
+		}
+	}
+	if state.DeviceID != "" && hasLocalIdentityKey(state) {
+		refreshed, ok, err := s.refreshTokenWithIdentity(ctx, endpoint, state)
+		if err == nil && ok {
+			return refreshed, endpoint, nil, nil
+		}
+		if err != nil && !isAuthError(err) {
+			s.logger.Warn("support identity session refresh failed; falling back to self-register", "error", err)
 		}
 	}
 
@@ -995,7 +1067,7 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 		invite = DefaultInviteCode
 	}
 	if strings.TrimSpace(invite) == "" {
-		// Offline-first: without an invite code, do not contact aima-service.
+		// Defensive guard for builds that intentionally clear DefaultInviteCode.
 		// The prompt error lets StartRegistrationWorker exit cleanly.
 		return deviceState{}, "", nil, &RegistrationPromptError{
 			Kind:   RegistrationPromptInviteOrWorker,
@@ -1012,6 +1084,7 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 		classifiedErr := classifyRegistrationError(err)
 		var browserErr *BrowserConfirmationError
 		if errors.As(classifiedErr, &browserErr) {
+			createdAt := s.now().UTC()
 			state.PendingBrowserConfirmation = &browserConfirmationState{
 				Detail:                  browserErr.Detail,
 				DeviceID:                browserErr.DeviceID,
@@ -1021,6 +1094,8 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 				VerificationURIComplete: browserErr.VerificationURIComplete,
 				ExpiresIn:               browserErr.ExpiresIn,
 				Interval:                browserErr.Interval,
+				CreatedAt:               createdAt.Format(time.RFC3339),
+				ExpiresAt:               browserConfirmationExpiresAtString(createdAt, browserErr.ExpiresIn),
 			}
 			if saveErr := s.saveState(ctx, state); saveErr != nil {
 				return deviceState{}, "", nil, saveErr
@@ -1034,6 +1109,9 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 	state.RecoveryCode = resp.RecoveryCode
 	state.ReferralCode = resp.ReferralCode
 	state.TokenExpiresAt = resp.TokenExpiresAt
+	state.TokenKind = resp.TokenKind
+	state.TokenPersistence = resp.TokenPersistence
+	state.PersistentTokenFallbackEnabled = resp.PersistentTokenFallbackEnabled
 	if resp.PollIntervalSeconds > 0 {
 		state.PollIntervalSeconds = resp.PollIntervalSeconds
 	}
@@ -1041,6 +1119,14 @@ func (s *Service) ensureRegistered(ctx context.Context, req AskRequest) (deviceS
 	applyRegistrationSummary(&state, &resp)
 	if err := s.saveState(ctx, state); err != nil {
 		return deviceState{}, "", nil, err
+	}
+	if isNonPersistentToken(state.TokenPersistence) {
+		next, ok, err := s.ensureIdentitySession(ctx, endpoint, state)
+		if err != nil {
+			s.logger.Warn("support identity session setup failed; continuing with short-lived registration token", "error", err)
+		} else if ok {
+			state = next
+		}
 	}
 	return state, endpoint, &resp, nil
 }
@@ -1051,10 +1137,15 @@ func (s *Service) renewTokenIfNeeded(ctx context.Context, endpoint string, state
 	}
 	if state.TokenExpiresAt != "" {
 		if expiresAt, err := time.Parse(time.RFC3339, state.TokenExpiresAt); err == nil {
-			if time.Until(expiresAt) > 24*time.Hour {
+			if expiresAt.Sub(s.now()) > 24*time.Hour {
 				return state, nil
 			}
 		}
+	}
+	if refreshed, ok, err := s.refreshTokenWithIdentity(ctx, endpoint, state); err == nil && ok {
+		return refreshed, nil
+	} else if err != nil && !isAuthError(err) {
+		s.logger.Warn("support identity token renewal failed; falling back to bearer renew", "error", err)
 	}
 
 	var resp renewTokenResponse
@@ -1068,10 +1159,69 @@ func (s *Service) renewTokenIfNeeded(ctx context.Context, endpoint string, state
 	if resp.TokenExpiresAt != "" {
 		state.TokenExpiresAt = resp.TokenExpiresAt
 	}
+	if resp.TokenKind != "" {
+		state.TokenKind = resp.TokenKind
+	}
+	if resp.TokenPersistence != "" {
+		state.TokenPersistence = resp.TokenPersistence
+	}
+	state.PersistentTokenFallbackEnabled = resp.PersistentTokenFallbackEnabled
 	if err := s.saveState(ctx, state); err != nil {
 		return state, err
 	}
 	return state, nil
+}
+
+func browserConfirmationExpiresAtString(createdAt time.Time, expiresIn int) string {
+	if expiresIn <= 0 {
+		return ""
+	}
+	return createdAt.Add(time.Duration(expiresIn) * time.Second).UTC().Format(time.RFC3339)
+}
+
+func browserConfirmationExpired(pending *browserConfirmationState, now time.Time) bool {
+	if pending == nil {
+		return false
+	}
+	if expiresAt := strings.TrimSpace(pending.ExpiresAt); expiresAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+			return !now.Before(parsed)
+		}
+	}
+	if pending.ExpiresIn <= 0 {
+		return false
+	}
+	if createdAt := strings.TrimSpace(pending.CreatedAt); createdAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			return !now.Before(parsed.Add(time.Duration(pending.ExpiresIn) * time.Second))
+		}
+	}
+	// Older builds persisted expires_in without a local timestamp. There is no
+	// reliable way to prove that code is still live, so refresh it instead of
+	// leaving the device stuck on an unrefreshable pending code.
+	return true
+}
+
+func browserConfirmationRetryDelay(pending *browserConfirmationState, now time.Time) time.Duration {
+	if pending == nil {
+		return minRegistrationBackoff
+	}
+	if expiresAt := strings.TrimSpace(pending.ExpiresAt); expiresAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+			if delay := parsed.Sub(now); delay > 0 {
+				return delay + time.Second
+			}
+			return minRegistrationBackoff
+		}
+	}
+	if pending.ExpiresIn > 0 && strings.TrimSpace(pending.CreatedAt) != "" {
+		if parsed, err := time.Parse(time.RFC3339, pending.CreatedAt); err == nil {
+			if delay := parsed.Add(time.Duration(pending.ExpiresIn) * time.Second).Sub(now); delay > 0 {
+				return delay + time.Second
+			}
+		}
+	}
+	return minRegistrationBackoff
 }
 
 func (s *Service) poll(ctx context.Context, endpoint string, state deviceState, waitSeconds int) (pollResponse, error) {
