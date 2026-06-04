@@ -18,6 +18,7 @@ type httpStatusError struct {
 	StatusCode int
 	Detail     string
 	Body       string
+	Payload    map[string]any
 }
 
 type browserConfirmationPayload struct {
@@ -50,6 +51,7 @@ func newHTTPStatusError(statusCode int, body []byte) error {
 		StatusCode: statusCode,
 		Detail:     detail,
 		Body:       strings.TrimSpace(string(body)),
+		Payload:    payload,
 	}
 }
 
@@ -121,6 +123,11 @@ func classifyRegistrationError(err error) error {
 	}
 	detail := strings.ToLower(strings.TrimSpace(statusErr.Detail))
 	switch {
+	case isHardwareIdentityConflict(statusErr):
+		return &RegistrationPromptError{
+			Kind:   RegistrationPromptHardwareIdentity,
+			Detail: statusErr.Detail,
+		}
 	case needsRecoveryPrompt(detail):
 		return &RegistrationPromptError{
 			Kind:   RegistrationPromptRecovery,
@@ -134,6 +141,22 @@ func classifyRegistrationError(err error) error {
 	default:
 		return err
 	}
+}
+
+func isHardwareIdentityConflict(err *httpStatusError) bool {
+	if err == nil || err.Payload == nil {
+		return false
+	}
+	method := strings.ToLower(strings.TrimSpace(payloadString(err.Payload, "reauth_method")))
+	return err.StatusCode == http.StatusConflict && method == "hardware_identity_conflict"
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func needsInvitePrompt(detail string) bool {
